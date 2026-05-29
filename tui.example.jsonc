@@ -1,0 +1,32 @@
+// Example ~/.config/opencode/tui.jsonc
+//
+// Copy or symlink this file to ~/.config/opencode/tui.jsonc, then adjust the
+// "plugin" paths to match where you cloned this repo.
+//
+// The "plugin" array uses file:// URLs pointing at the TUI plugin
+// directories. OpenCode picks them up through their package.json exports.
+{
+  "$schema": "https://opencode.ai/tui.json",
+
+  // Theme defined in themes/ayu-max-custom.json — also symlink that into
+  // ~/.config/opencode/themes/ for it to resolve by name.
+  "theme": "ayu-max-custom",
+
+  // TUI plugins. Replace /path/to/my-opencode-setup with wherever you cloned
+  // the repo.
+  "plugin": [
+    "file:///path/to/my-opencode-setup/plugins/elapsed-timer",
+    "file:///path/to/my-opencode-setup/plugins/tokens-per-sec",
+    "file:///path/to/my-opencode-setup/plugins/session-id-badge"
+  ],
+
+  // Built-in OpenCode attention/notification feature. Independent of the
+  // plugins in this repo — included here so the example is a complete
+  // tui.jsonc.
+  "attention": {
+    "enabled": true,
+    "notifications": true,
+    "sound": true,
+    "volume": 0.4
+  }
+}
