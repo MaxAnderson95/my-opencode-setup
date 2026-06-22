@@ -21,9 +21,9 @@ my-opencode-setup/
 | `brrr.ts` | Posts session lifecycle events to a [brrr.now](https://brrr.now) webhook so I get phone notifications when a session goes idle. Requires `BRRR_WEBHOOK_SECRET`. |
 | `caffeinate.ts` | Keeps macOS awake while sessions are working. One `caffeinate -di` process per session; the machine can sleep again as soon as every session is idle. |
 | `current-session-id.ts` | Exposes the current session ID as the `get_opencode_current_session_id` tool and injects it into the system prompt so the agent can reference it without spending a tool call. |
-| `delete-session.ts` | Backs the `/delete` slash command — short-circuits the command template and calls `client.session.delete` directly. |
+| `delete-session.ts` | Compatibility stub retained for older installs. `/delete` is handled by `local-session-commands/`. |
 | `ghostty-progress.ts` | Drives Ghostty's OSC 9;4 progress bar indicator while sessions are working. Requires Ghostty 1.2.0+. |
-| `open-in-finder.ts` | Backs the `/open` slash command — opens the current directory (or a given path) with the macOS `open` command. |
+| `open-in-finder.ts` | Compatibility stub retained for older installs. `/open` is handled by `local-session-commands/`. |
 | `sensitive-file-guard.ts` | Blocks LLM reads, edits, and copy-into-bash of `.env`, private keys, kubeconfigs, and similar files. Adds a `list_env_keys` tool so the agent can still inspect env file shape (keys only, never values). |
 | `tool-timing.ts` | Appends wall-clock duration to every tool call's title so the TUI shows how long each step took. Works for both native and MCP tools. |
 
@@ -34,6 +34,7 @@ These use the [`@opentui/solid`](https://github.com/sst/opencode) JSX runtime an
 | Plugin | Description |
 |---|---|
 | `elapsed-timer/` | Shows running session duration in the TUI sidebar. |
+| `local-session-commands/` | Handles `/open [path]` and `/delete` directly in the TUI without sending command templates to the LLM. |
 | `session-id-badge/` | Shows the current session ID in the TUI sidebar. |
 | `tokens-per-sec/` | Live tokens-per-second display with a sliding-window average, useful for benchmarking models. |
 
@@ -43,10 +44,10 @@ Slash commands that pair with the plugins above:
 
 | File | Triggers | Plugin it relies on |
 |---|---|---|
-| `commands/delete.md` | `/delete` | `delete-session.ts` |
-| `commands/open.md` | `/open [path]` | `open-in-finder.ts` |
+| `commands/delete.md` | `/delete` | `local-session-commands/` |
+| `commands/open.md` | `/open [path]` | `local-session-commands/` |
 
-Without the matching plugin, the command falls back to sending its template text to the LLM.
+Without the matching TUI plugin, the command falls back to sending its template text to the LLM.
 
 ## Theme
 
@@ -68,6 +69,9 @@ ln -s "$PWD/plugins/sensitive-file-guard.ts" ~/.config/opencode/plugins/sensitiv
 # Slash commands (only useful if you also installed the paired plugin)
 ln -s "$PWD/commands/delete.md" ~/.config/opencode/commands/delete.md
 ln -s "$PWD/commands/open.md"   ~/.config/opencode/commands/open.md
+
+# TUI local commands
+ln -s "$PWD/plugins/local-session-commands" ~/.config/opencode/plugins/local-session-commands
 
 # Theme
 ln -s "$PWD/themes/ayu-max-custom.json" ~/.config/opencode/themes/ayu-max-custom.json

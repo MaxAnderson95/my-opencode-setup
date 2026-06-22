@@ -17,7 +17,8 @@
   "plugin": [
     "file:///path/to/my-opencode-setup/plugins/elapsed-timer",
     "file:///path/to/my-opencode-setup/plugins/tokens-per-sec",
-    "file:///path/to/my-opencode-setup/plugins/session-id-badge"
+    "file:///path/to/my-opencode-setup/plugins/session-id-badge",
+    "file:///path/to/my-opencode-setup/plugins/local-session-commands"
   ],
 
   // Built-in OpenCode attention/notification feature. Independent of the
