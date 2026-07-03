@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "oc-plugin-sensitive-file-guard",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "main": "./sensitive-file-guard.ts",
+  "engines": { "opencode": ">=1.3.14" },
+  "peerDependencies": { "@opencode-ai/plugin": "*" }
+}

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "oc-plugin-open-in-finder",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "main": "./open-in-finder.ts",
+  "engines": { "opencode": ">=1.3.14" },
+  "peerDependencies": { "@opencode-ai/plugin": "*" }
+}

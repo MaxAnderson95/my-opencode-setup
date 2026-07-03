@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "oc-plugin-recall",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "main": "./recall.ts",
+  "engines": { "opencode": ">=1.3.14" },
+  "dependencies": { "@huggingface/transformers": "*" },
+  "peerDependencies": { "@opencode-ai/plugin": "*" }
+}
