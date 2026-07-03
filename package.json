@@ -5,6 +5,7 @@
   "type": "module",
   "private": true,
   "description": "Max Anderson's custom OpenCode plugins, commands, and themes",
+  "workspaces": ["plugins/*"],
   "dependencies": {
     "@huggingface/transformers": "^3.7.0",
     "@opencode-ai/plugin": "^1.15.10"
