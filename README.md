@@ -6,36 +6,36 @@ My personal [OpenCode](https://opencode.ai) plugins, slash commands, theme, and 
 
 ```
 my-opencode-setup/
-├── plugins/          OpenCode plugins
+├── plugins/          OpenCode plugins — one folder per plugin, each with its own package.json
 ├── commands/         Slash commands paired with the plugins
 ├── themes/           Custom theme
+├── link.sh           Symlinks each plugin into your OpenCode config
 └── tui.example.jsonc Sample tui.jsonc showing how to wire everything together
 ```
 
-## Plugins
+Every plugin is a self-contained folder (`plugins/<name>/`) with its own `package.json`. There are two kinds, and they load differently — see [Install](#install).
 
-### Single-file plugins (`plugins/*.ts`)
+## Server plugins
+
+Regular plugins that hook OpenCode's event/tool system. OpenCode auto-discovers them by scanning `plugins/*.{ts,js}` (**top-level files only**, but it follows symlinks), so each one is symlinked into `~/.config/opencode/plugins/<name>.ts` pointing at the folder's inner source file.
 
 | Plugin | Description |
 |---|---|
-| `brrr.ts` | Posts session lifecycle events to a [brrr.now](https://brrr.now) webhook so I get phone notifications when a session goes idle. Requires `BRRR_WEBHOOK_SECRET`. |
-| `caffeinate.ts` | Keeps macOS awake while sessions are working. One `caffeinate -di` process per session; the machine can sleep again as soon as every session is idle. |
-| `current-session-id.ts` | Exposes the current session ID as the `get_opencode_current_session_id` tool and injects it into the system prompt so the agent can reference it without spending a tool call. |
-| `delete-session.ts` | Compatibility stub retained for older installs. `/delete` is handled by `local-session-commands/`. |
-| `ghostty-progress.ts` | Drives Ghostty's OSC 9;4 progress bar indicator while sessions are working. Requires Ghostty 1.2.0+. |
-| `open-in-finder.ts` | Compatibility stub retained for older installs. `/open` is handled by `local-session-commands/`. |
-| `sensitive-file-guard.ts` | Blocks LLM reads, edits, and copy-into-bash of `.env`, private keys, kubeconfigs, and similar files. Adds a `list_env_keys` tool so the agent can still inspect env file shape (keys only, never values). |
-| `tool-timing.ts` | Appends wall-clock duration to every tool call's title so the TUI shows how long each step took. Works for both native and MCP tools. |
+| `brrr/` | Posts session lifecycle events to a [brrr.now](https://brrr.now) webhook so I get phone notifications when a session goes idle. Requires `BRRR_WEBHOOK_SECRET`. |
+| `caffeinate/` | Keeps macOS awake while sessions are working. One `caffeinate -di` process per session; the machine can sleep again once every session is idle. |
+| `current-session-id/` | Exposes the current session ID as the `get_opencode_current_session_id` tool and injects it into the system prompt so the agent can reference it without spending a tool call. |
+| `delete-session/` | Compatibility stub retained for older installs. `/delete` is handled by `local-session-commands/`. |
+| `engram/` | Thin adapter connecting OpenCode's event system to the [Engram](https://github.com/) persistent-memory binary (a local HTTP server backed by SQLite). Injects the memory protocol into context and forwards lifecycle events. |
+| `ghostty-progress/` | Drives Ghostty's OSC 9;4 progress-bar indicator while sessions are working. Requires Ghostty 1.2.0+. |
+| `mcp-lazy/` | Model-controlled MCP server enable/disable so only in-use servers cost tool-schema context. Injects a per-turn Active/Available MCP block and adds `mcp_enable` / `mcp_disable` tools; always-on servers (`enabled !== false`) are protected from disable. |
+| `open-in-finder/` | Compatibility stub retained for older installs. `/open` is handled by `local-session-commands/`. |
+| `recall/` | Long-term conversational memory: hybrid lexical (FTS5/BM25) + semantic (local embeddings via transformers.js) search over **every past OpenCode conversation on the machine**, exposed as `recall_search`, `recall_expand`, and `recall_status`. Fully local — reads the OpenCode DB read-only into a sidecar index; the only network access is a one-time model download. Full docs: [plugins/recall/README.md](plugins/recall/README.md). |
+| `sensitive-file-guard/` | Blocks LLM reads, edits, and copy-into-bash of `.env`, private keys, kubeconfigs, and similar files. Adds a `list_env_keys` tool so the agent can still inspect env-file shape (keys only, never values). |
+| `tool-timing/` | Appends wall-clock duration to every tool call's title so the TUI shows how long each step took. Works for both native and MCP tools. |
 
-### `recall/` — search past conversations
+## TUI plugins
 
-Gives the agent long-term conversational memory: hybrid lexical (FTS5/BM25) + semantic (local embeddings, transformers.js) search over **every past OpenCode conversation on the machine**, exposed as the `recall_search`, `recall_expand`, and `recall_status` tools. Fully local — the OpenCode DB is read read-only into a sidecar index, and the only network access is a one-time ~33 MB model download. Can even recover the current session's own pre-compaction history.
-
-Symlink the file, not the directory (`plugins/recall/recall.ts` → `~/.config/opencode/plugins/recall.ts`). Full docs: [plugins/recall/README.md](plugins/recall/README.md).
-
-### TUI plugins (`plugins/<dir>/`)
-
-These use the [`@opentui/solid`](https://github.com/sst/opencode) JSX runtime and ship as multi-file plugins with their own `package.json`.
+These use the [`@opentui/solid`](https://github.com/sst/opencode) JSX runtime and expose a `./tui` entrypoint via their `package.json`. They are **not** auto-scanned — you symlink the whole directory and list it in `tui.jsonc`.
 
 | Plugin | Description |
 |---|---|
@@ -61,34 +61,41 @@ Without the matching TUI plugin, the command falls back to sending its template 
 
 ## Install
 
-Clone the repo somewhere persistent (e.g. `~/my-opencode-setup`), then symlink each piece into its OpenCode location.
+Clone the repo somewhere persistent, then symlink each piece into its OpenCode location.
 
 ```bash
 git clone https://github.com/MaxAnderson95/my-opencode-setup.git ~/my-opencode-setup
 cd ~/my-opencode-setup
-
-# Plugins — symlink the ones you want
-ln -s "$PWD/plugins/tool-timing.ts"        ~/.config/opencode/plugins/tool-timing.ts
-ln -s "$PWD/plugins/sensitive-file-guard.ts" ~/.config/opencode/plugins/sensitive-file-guard.ts
-# ...or symlink the whole plugins directory
-
-# recall — symlink the file, not the directory (the loader only scans plugins/*.ts)
-ln -s "$PWD/plugins/recall/recall.ts" ~/.config/opencode/plugins/recall.ts
-
-# Slash commands (only useful if you also installed the paired plugin)
-ln -s "$PWD/commands/delete.md" ~/.config/opencode/commands/delete.md
-ln -s "$PWD/commands/open.md"   ~/.config/opencode/commands/open.md
-
-# TUI local commands
-ln -s "$PWD/plugins/local-session-commands" ~/.config/opencode/plugins/local-session-commands
-
-# Theme
-ln -s "$PWD/themes/ayu-max-custom.json" ~/.config/opencode/themes/ayu-max-custom.json
+bun install            # resolves @opencode-ai/plugin, transformers.js, etc.
+./link.sh              # symlinks every plugin into ~/.config/opencode/plugins/
 ```
 
-TUI plugins additionally need their `package.json` resolvable — either install their `peerDependencies` (`@opentui/core`, `@opentui/solid`, `solid-js`) at the `~/.config/opencode/` level, or symlink the directory and let OpenCode pick them up via its own resolution.
+`link.sh` handles both kinds automatically:
 
-See [`tui.example.jsonc`](tui.example.jsonc) for a complete `tui.jsonc` showing how to wire the theme and TUI plugins together.
+- **Server plugins** → symlinks the inner file, e.g. `plugins/tool-timing/tool-timing.ts` → `~/.config/opencode/plugins/tool-timing.ts`. This is required because the loader's auto-scan matches only top-level `plugins/*.{ts,js}` — symlinking the whole `plugins/` directory would leave the nested server plugins undiscovered.
+- **TUI plugins** → symlinks the directory, e.g. `plugins/elapsed-timer` → `~/.config/opencode/plugins/elapsed-timer`, and reminds you to add it to `tui.jsonc`.
+
+Then wire up the theme and TUI plugins in `tui.jsonc` (see [`tui.example.jsonc`](tui.example.jsonc)):
+
+```jsonc
+{
+  "theme": "ayu-max-custom",
+  "plugin": [
+    "file:///Users/you/.config/opencode/plugins/elapsed-timer",
+    "file:///Users/you/.config/opencode/plugins/tokens-per-sec",
+    "file:///Users/you/.config/opencode/plugins/session-id-badge",
+    "file:///Users/you/.config/opencode/plugins/local-session-commands"
+  ]
+}
+```
+
+And symlink the slash commands (only useful if you also installed the paired TUI plugin):
+
+```bash
+ln -s "$PWD/commands/delete.md" ~/.config/opencode/commands/delete.md
+ln -s "$PWD/commands/open.md"   ~/.config/opencode/commands/open.md
+ln -s "$PWD/themes/ayu-max-custom.json" ~/.config/opencode/themes/ayu-max-custom.json
+```
 
 ## License
 
