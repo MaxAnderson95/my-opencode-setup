@@ -27,6 +27,12 @@ my-opencode-setup/
 | `sensitive-file-guard.ts` | Blocks LLM reads, edits, and copy-into-bash of `.env`, private keys, kubeconfigs, and similar files. Adds a `list_env_keys` tool so the agent can still inspect env file shape (keys only, never values). |
 | `tool-timing.ts` | Appends wall-clock duration to every tool call's title so the TUI shows how long each step took. Works for both native and MCP tools. |
 
+### `recall/` — search past conversations
+
+Gives the agent long-term conversational memory: hybrid lexical (FTS5/BM25) + semantic (local embeddings, transformers.js) search over **every past OpenCode conversation on the machine**, exposed as the `recall_search`, `recall_expand`, and `recall_status` tools. Fully local — the OpenCode DB is read read-only into a sidecar index, and the only network access is a one-time ~33 MB model download. Can even recover the current session's own pre-compaction history.
+
+Symlink the file, not the directory (`plugins/recall/recall.ts` → `~/.config/opencode/plugins/recall.ts`). Full docs: [plugins/recall/README.md](plugins/recall/README.md).
+
 ### TUI plugins (`plugins/<dir>/`)
 
 These use the [`@opentui/solid`](https://github.com/sst/opencode) JSX runtime and ship as multi-file plugins with their own `package.json`.
@@ -65,6 +71,9 @@ cd ~/my-opencode-setup
 ln -s "$PWD/plugins/tool-timing.ts"        ~/.config/opencode/plugins/tool-timing.ts
 ln -s "$PWD/plugins/sensitive-file-guard.ts" ~/.config/opencode/plugins/sensitive-file-guard.ts
 # ...or symlink the whole plugins directory
+
+# recall — symlink the file, not the directory (the loader only scans plugins/*.ts)
+ln -s "$PWD/plugins/recall/recall.ts" ~/.config/opencode/plugins/recall.ts
 
 # Slash commands (only useful if you also installed the paired plugin)
 ln -s "$PWD/commands/delete.md" ~/.config/opencode/commands/delete.md
