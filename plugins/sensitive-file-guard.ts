@@ -6,7 +6,6 @@ import { tool } from "@opencode-ai/plugin"
 
 type GuardOptions = PluginOptions & {
   protected?: string[]
-  allowEnvKeyListingFor?: string[]
   blockCopy?: boolean
 }
 
@@ -52,8 +51,6 @@ const DEFAULT_PROTECTED = [
   "**/service-account*.json",
 ]
 
-const DEFAULT_ENV_KEY_LISTING = [".env", ".env.*", "**/.env", "**/.env.*"]
-
 const PATH_ARG_KEYS = new Set(["path", "file", "filepath", "filePath"])
 
 const READ_COMMANDS = new Set([
@@ -81,9 +78,11 @@ const COPY_COMMANDS = new Set(["cp", "mv", "install", "rsync", "scp"])
 const ARCHIVE_COMMANDS = new Set(["tar", "zip", "gzip", "bzip2", "xz", "7z"])
 const ENV_DUMP_COMMANDS = new Set(["env", "printenv", "set", "export", "declare"])
 
-const SOURCE_RE = /(?:^|[;&|]\s*)(?:source|\.)\s+(["']?[^\s;&|"']+["']?)/g
-const INTERPRETER_READ_RE = /\b(?:python\d*|node|ruby|perl|php|bun|deno)\b[\s\S]*\b(?:open|readFileSync|readFile|File\.read|IO\.read|file_get_contents)\s*\(/i
+const INTERPRETER_COMMAND_RE = /\b(?:python\d*|node|ruby|perl|php|bun|deno)\b/i
+const INTERPRETER_READ_ARG_RE = /\b(?:open|readFileSync|readFile|File\.read|IO\.read|file_get_contents)\s*\(\s*(["'])([^"']+)\1/gi
 const SHELL_LIST_ENV_KEYS_RE = /(?:^|[;&|()]\s*)list_env_keys(?:\s|$)/
+const SENSITIVE_VAR_NAME_RE = /(?:^|_)(?:TOKEN|SECRET|PASSWORD|PASS|CREDENTIAL|PRIVATE|ACCESS_TOKEN|REFRESH_TOKEN|API_TOKEN|API_KEY|CLIENT_SECRET|KEY)(?:_|$)/i
+const SHELL_VARIABLE_RE = /\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{#?([A-Za-z_][A-Za-z0-9_]*)(?:[^}]*)\})/g
 
 // Used by protectedRawMatch to detect protected files embedded inside larger
 // non-token-shaped command fragments (stdin redirects, interpreter strings,
@@ -208,8 +207,16 @@ function stripShellComments(command: string): string {
   let result = ""
   let quote: string | undefined
   let escaped = false
+  let comment = false
 
   for (const char of command) {
+    if (comment) {
+      if (char === "\n" || char === "\r") {
+        result += char
+        comment = false
+      }
+      continue
+    }
     if (escaped) {
       result += char
       escaped = false
@@ -230,7 +237,11 @@ function stripShellComments(command: string): string {
       result += char
       continue
     }
-    if (char === "#") break
+    const previous = result[result.length - 1]
+    if (char === "#" && (!previous || /[\s;&|()<>]/.test(previous))) {
+      comment = true
+      continue
+    }
     result += char
   }
 
@@ -251,7 +262,7 @@ function tokenize(command: string): string[] {
 
   for (const char of stripShellComments(command)) {
     if (escaped) {
-      current += char
+      if (char !== "\n" && char !== "\r") current += char
       escaped = false
       continue
     }
@@ -266,6 +277,11 @@ function tokenize(command: string): string[] {
     }
     if (char === "'" || char === '"') {
       quote = char
+      continue
+    }
+    if (char === "\n" || char === "\r") {
+      push()
+      tokens.push(";")
       continue
     }
     if (/\s/.test(char)) {
@@ -338,19 +354,86 @@ function protectedRawMatch(
   return protectedTokenMatch(rawTokens, directory, worktree, patterns)
 }
 
-function sourcedProtectedEnvFiles(
+function interpreterProtectedReadMatch(
   command: string,
+  directory: string,
+  worktree: string,
+  patterns: string[],
+): Match | undefined {
+  if (!INTERPRETER_COMMAND_RE.test(command)) return undefined
+
+  for (const readMatch of command.matchAll(INTERPRETER_READ_ARG_RE)) {
+    const file = readMatch[2]
+    const match = file ? matchProtectedPath(file, directory, worktree, patterns) : undefined
+    if (match) return match
+  }
+
+  return undefined
+}
+
+function sourcePathFromSegment(segment: string[]): string | undefined {
+  const sourceIndex = segment.findIndex((token) => token === "source" || token === ".")
+  if (sourceIndex === -1) return undefined
+  return segment[sourceIndex + 1]
+}
+
+function cdPathFromSegment(segment: string[]): string | undefined {
+  if (firstCommand(segment) !== "cd") return undefined
+
+  const cdIndex = segment.findIndex((token) => token === "cd")
+  if (cdIndex === -1) return undefined
+  for (const token of segment.slice(cdIndex + 1)) {
+    if (token.startsWith("-")) continue
+    return token
+  }
+
+  return undefined
+}
+
+function resolveShellPath(rawPath: string, directory: string): string | undefined {
+  const cleaned = cleanPathToken(rawPath)
+  if (!cleaned) return undefined
+  return path.resolve(path.isAbsolute(cleaned) ? cleaned : path.join(directory, cleaned))
+}
+
+function sourcedProtectedEnvFiles(
+  tokens: string[],
   directory: string,
   worktree: string,
   patterns: string[],
 ): Match[] {
   const matches: Match[] = []
-  for (const sourceMatch of command.matchAll(SOURCE_RE)) {
-    const file = sourceMatch[1]
-    const match = file ? matchProtectedPath(file, directory, worktree, patterns) : undefined
+  let currentDirectory = directory
+
+  for (const segment of commandSegments(tokens)) {
+    const file = sourcePathFromSegment(segment)
+    const match = file ? matchProtectedPath(file, currentDirectory, worktree, patterns) : undefined
     if (match) matches.push(match)
+
+    const cdPath = cdPathFromSegment(segment)
+    const nextDirectory = cdPath ? resolveShellPath(cdPath, currentDirectory) : undefined
+    if (nextDirectory) currentDirectory = nextDirectory
   }
+
   return matches
+}
+
+function sourcedEnvKeys(matches: Match[]): Set<string> | undefined {
+  const keys = new Set<string>()
+
+  for (const match of matches) {
+    if (!existsSync(match.abs)) return undefined
+
+    try {
+      for (const key of parseEnvKeys(readFileSync(match.abs, "utf8")).keys) {
+        keys.add(key)
+      }
+    } catch {
+      return undefined
+    }
+  }
+
+  return keys
 }
 
 function sourceFollowedByDump(tokens: string[]): boolean {
@@ -374,11 +457,40 @@ function sourceFollowedByDump(tokens: string[]): boolean {
   return false
 }
 
-function tokenContainsShellVariable(token: string): boolean {
-  return /\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})/.test(token)
+function shellVariableNames(token: string): string[] {
+  const names: string[] = []
+  for (const match of token.matchAll(SHELL_VARIABLE_RE)) {
+    const name = match[1] ?? match[2]
+    if (name) names.push(name)
+  }
+  return names
 }
 
-function sourceFollowedByVariablePrint(tokens: string[]): boolean {
+function tokenContainsShellVariable(token: string): boolean {
+  return shellVariableNames(token).length > 0
+}
+
+function stdoutRedirectionTarget(segment: string[]): string | undefined {
+  for (let index = 0; index < segment.length; index++) {
+    if (segment[index] !== ">") continue
+    if (segment[index - 1] === "2") continue
+
+    let targetIndex = index + 1
+    while (segment[targetIndex] === ">") targetIndex++
+    return segment[targetIndex]
+  }
+  return undefined
+}
+
+function redirectsStdoutAway(segment: string[]): boolean {
+  const target = stdoutRedirectionTarget(segment)
+  if (!target) return false
+
+  const cleaned = stripOuterQuotes(target)
+  return !["&1", "1", "/dev/stdout", "/dev/fd/1", "/proc/self/fd/1"].includes(cleaned)
+}
+
+function sourceFollowedByVariablePrint(tokens: string[], protectedKeys: Set<string> | undefined): boolean {
   const sourceIndex = tokens.findIndex((token) => token === "source" || token === ".")
   if (sourceIndex === -1) return false
   const rest = tokens.slice(sourceIndex + 2)
@@ -386,13 +498,29 @@ function sourceFollowedByVariablePrint(tokens: string[]): boolean {
   for (const segment of commandSegments(rest)) {
     const command = firstCommand(segment)
     if (command !== "echo" && command !== "printf") continue
-    if (segment.some(tokenContainsShellVariable)) return true
+    if (redirectsStdoutAway(segment)) continue
+
+    const variables = new Set<string>()
+    for (const token of segment) {
+      for (const name of shellVariableNames(token)) variables.add(name)
+    }
+    if (variables.size === 0) continue
+
+    // If the sourced file cannot be read for key extraction, stay conservative.
+    if (!protectedKeys) return true
+    for (const name of variables) {
+      if (protectedKeys.has(name) || SENSITIVE_VAR_NAME_RE.test(name)) return true
+    }
   }
 
   return false
 }
 
-export function analyzeBashCommand(
+// NOTE: intentionally NOT exported. opencode's plugin loader iterates every
+// module export and calls each as a plugin factory; exporting this helper made
+// the loader invoke it with a PluginInput, which crashed in tokenize() with
+// "{} is not iterable" and aborted loading the whole guard. Keep it file-local.
+function analyzeBashCommand(
   command: string,
   directory: string,
   worktree: string,
@@ -410,13 +538,14 @@ export function analyzeBashCommand(
   }
 
   const tokens = tokenize(command)
-  const sourced = sourcedProtectedEnvFiles(command, directory, worktree, patterns)
+  const sourced = sourcedProtectedEnvFiles(tokens, directory, worktree, patterns)
   if (sourced.length > 0) {
     if (sourceFollowedByDump(tokens)) return { blocked: true, match: sourced[0], reason: "env dump after sourcing" }
-    if (sourceFollowedByVariablePrint(tokens)) return { blocked: true, match: sourced[0], reason: "variable print after sourcing" }
+    if (sourceFollowedByVariablePrint(tokens, sourcedEnvKeys(sourced))) return { blocked: true, match: sourced[0], reason: "variable print after sourcing" }
   }
 
   const rawMatch = protectedRawMatch(command, directory, worktree, patterns)
+  const interpreterMatch = interpreterProtectedReadMatch(command, directory, worktree, patterns)
   for (const segment of commandSegments(tokens)) {
     const commandName = firstCommand(segment)
     const segmentMatch = protectedTokenMatch(segment, directory, worktree, patterns)
@@ -436,8 +565,11 @@ export function analyzeBashCommand(
       return { blocked: true, match: rawMatch, reason: "stdin redirection from protected file" }
     }
     if (/[;&|]\s*(?:echo|printf)\b[\s\S]*\$\(<\s*/.test(command)) return { blocked: true, match: rawMatch, reason: "shell read substitution" }
-    if (INTERPRETER_READ_RE.test(command)) return { blocked: true, match: rawMatch, reason: "interpreter file read" }
     if (/@["']?[^\s;&|"']*\.env/i.test(command)) return { blocked: true, match: rawMatch, reason: "file upload/include syntax" }
+  }
+
+  if (interpreterMatch && !isExempt(interpreterMatch.abs)) {
+    return { blocked: true, match: interpreterMatch, reason: "interpreter file read" }
   }
 
   return { blocked: false }
@@ -650,7 +782,6 @@ function parseEnvKeys(contents: string): { keys: string[]; blankOrComment: numbe
 
 export const SensitiveFileGuard: Plugin = async (ctx, options?: GuardOptions) => {
   const protectedPatterns = options?.protected ?? DEFAULT_PROTECTED
-  const envKeyPatterns = options?.allowEnvKeyListingFor ?? DEFAULT_ENV_KEY_LISTING
   const blockCopy = options?.blockCopy ?? true
 
   const exempt = (abs: string) => isExemptForHook(abs, ctx.worktree)
@@ -659,14 +790,11 @@ export const SensitiveFileGuard: Plugin = async (ctx, options?: GuardOptions) =>
     tool: {
       list_env_keys: tool({
         description:
-          "Safely list variable names from a protected key=value env file. Returns keys only, never values. This is an OpenCode tool, not a shell command; call it directly instead of running list_env_keys in bash.",
+          "Safely list variable names (keys) from a key=value file such as .env. Returns keys only, never values. This is an OpenCode tool, not a shell command; call it directly instead of running list_env_keys in bash.",
         args: {
-          path: tool.schema.string().describe("Path to an env file such as .env or .env.local"),
+          path: tool.schema.string().describe("Path to a key=value file such as .env or .env.local"),
         },
         async execute(args, context) {
-          const match = matchProtectedPath(args.path, context.directory, context.worktree, envKeyPatterns)
-          if (!match) throw new Error("Env key listing is only allowed for configured env-file patterns.")
-
           const abs = path.resolve(path.isAbsolute(args.path) ? args.path : path.join(context.directory, args.path))
           if (!existsSync(abs)) throw new Error(`Env file not found: ${normalizeForDisplay(abs, context.directory)}`)
 
