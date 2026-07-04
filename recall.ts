@@ -2,8 +2,8 @@
  * recall — hybrid lexical (FTS5/BM25) + semantic (embedding) search over ALL past
  * OpenCode conversations on this machine.
  *
- * Replaces the past-conversations skill (ad-hoc SQL over the opencode DB) with three
- * agent tools: recall_search, recall_expand, recall_status.
+ * Replaces the past-conversations skill (ad-hoc SQL over the opencode DB) with four
+ * agent tools: recall_search, recall_expand, recall_summarize, recall_status.
  *
  * Design notes:
  * - Sidecar index at ~/.local/share/opencode-recall/index.db — the opencode DB is
@@ -16,6 +16,10 @@
  * - Indexing: session.idle events + a watermark-based catch-up backfill on startup.
  *   Idempotent per-session rebuild; embeddings reused via content hash.
  * - The embedder (~300MB RSS) is lazy-loaded and disposed after 10 min idle.
+ * - recall_summarize offloads whole-session summarization to a cheap fast
+ *   large-context model (GLM-5.2 via OpenCode Go — NOT Zen) in an ephemeral,
+ *   tool-less worker session that is deleted afterwards; results are cached in
+ *   the sidecar keyed by (session, watermark, model, focus).
  */
 import fs from "node:fs"
 import path from "node:path"
@@ -40,7 +44,13 @@ const PAIR_ASSISTANT_CHARS = 900
 const TOOL_OUTPUT_CHARS = 16_000
 const RRF_K = 60
 const CANDIDATES = 60
-const OWN_TOOLS = new Set(["recall_search", "recall_expand", "recall_status"])
+const OWN_TOOLS = new Set(["recall_search", "recall_expand", "recall_status", "recall_summarize"])
+// Summarizer worker: cheap + fast + 1M context, billed to the OpenCode Go plan (NOT Zen).
+const SUMMARY_MODEL = { providerID: "opencode-go", modelID: "glm-5.2" }
+const SUMMARY_CHAR_BUDGET = 300_000
+const SUMMARY_MSG_CHARS = 2_000
+const SUMMARY_TIMEOUT_MS = 180_000
+const WORKER_PREFIX = "recall-summarizer worker: "
 
 // ---------------------------------------------------------------- utilities
 
@@ -160,7 +170,9 @@ embedderReaper.unref?.()
 
 // ---------------------------------------------------------------- plugin
 
-export const RecallPlugin: Plugin = async () => {
+export const RecallPlugin: Plugin = async (input) => {
+  // Server API client — used only by recall_summarize's ephemeral worker.
+  const client = (input as { client?: any } | undefined)?.client
   // Never let init failures break opencode; disable ourselves instead.
   let srcDb: Database
   let idxDb: Database
@@ -196,6 +208,15 @@ export const RecallPlugin: Plugin = async () => {
     idxDb.run(`CREATE TABLE IF NOT EXISTS sessions(
       id TEXT PRIMARY KEY, slug TEXT, title TEXT, directory TEXT,
       parent_id TEXT, time_created INTEGER, time_updated INTEGER)`)
+    // Summary cache — deliberately NOT cleared on embedding-model change.
+    idxDb.run(`CREATE TABLE IF NOT EXISTS summaries(
+      session_id TEXT NOT NULL,
+      model TEXT NOT NULL,
+      focus TEXT NOT NULL DEFAULT '',
+      time_updated INTEGER NOT NULL,
+      summary TEXT NOT NULL,
+      created INTEGER NOT NULL,
+      PRIMARY KEY (session_id, model, focus))`)
 
     // model change -> full semantic + lexical reindex
     const meta = idxDb.query(`SELECT value FROM meta WHERE key='model'`).get() as { value: string } | null
@@ -268,6 +289,8 @@ export const RecallPlugin: Plugin = async () => {
         purgeSession(sessionId)
         return
       }
+      // Never index our own ephemeral summarizer workers (deleted after use anyway).
+      if (s.title?.startsWith(WORKER_PREFIX)) return
       const wm = idxDb.query(`SELECT time_updated t FROM indexed_sessions WHERE session_id=?`).get(sessionId) as {
         t: number
       } | null
@@ -491,6 +514,103 @@ export const RecallPlugin: Plugin = async () => {
     } catch {
       return 0
     }
+  }
+
+  type SessionRow = {
+    id: string
+    slug: string
+    title: string
+    directory: string
+    time_created: number
+    time_updated: number
+  }
+
+  /** Resolve a ses_ id or slug. Slugs are NOT unique; exact id wins, else newest. */
+  function findSession(idOrSlug: string): SessionRow[] {
+    return srcDb
+      .query(
+        `SELECT id, slug, title, directory, time_created, time_updated FROM session
+         WHERE id=? OR slug=? ORDER BY (id=?) DESC, time_updated DESC LIMIT 5`,
+      )
+      .all(idOrSlug, idOrSlug, idOrSlug) as SessionRow[]
+  }
+
+  /** One transcript block per message: collapsed tool one-liners + trimmed text. */
+  function renderMessage(m: MsgRow, maxChars: number): string | null {
+    const parts = srcDb
+      .query(`SELECT data FROM part WHERE message_id=? ORDER BY time_created, id`)
+      .all(m.id) as { data: string }[]
+    const texts: string[] = []
+    const tools: string[] = []
+    let lastTool = ""
+    let lastToolCount = 0
+    const flushTool = () => {
+      if (!lastToolCount) return
+      tools.push(lastToolCount > 1 ? `${lastTool} (×${lastToolCount})` : lastTool)
+      lastToolCount = 0
+    }
+    for (const p of parts) {
+      try {
+        const d = JSON.parse(p.data)
+        if (d.type === "text" && typeof d.text === "string" && d.text.trim()) texts.push(d.text)
+        else if (d.type === "tool" && d.tool) {
+          const line = `[tool ${d.tool}] ${clean(String(d.state?.title ?? ""), 80)}`.trimEnd()
+          if (line === lastTool) lastToolCount++
+          else {
+            flushTool()
+            lastTool = line
+            lastToolCount = 1
+          }
+        }
+      } catch {}
+    }
+    flushTool()
+    const body = [...tools, texts.length ? clean(texts.join("\n"), maxChars) : ""].filter(Boolean).join("\n")
+    if (!body) return null
+    return `── ${m.role ?? "assistant"} @ ${fmtDateTime(m.time_created)} (${m.id})\n${body}`
+  }
+
+  /** Compact whole-session transcript for the summarizer, middle-out truncated
+   *  (goals live at the start of a session, outcomes at the end). */
+  function fullTranscript(sessionId: string, budget: number): { text: string; messages: number } {
+    const messages = srcDb
+      .query(
+        `SELECT id, json_extract(data,'$.role') role, time_created
+         FROM message WHERE session_id=? ORDER BY time_created, id`,
+      )
+      .all(sessionId) as MsgRow[]
+    const blocks: string[] = []
+    for (const m of messages) {
+      const b = renderMessage(m, SUMMARY_MSG_CHARS)
+      if (b) blocks.push(b)
+    }
+    const total = blocks.reduce((n, b) => n + b.length + 1, 0)
+    if (total > budget) {
+      const head: string[] = []
+      const tail: string[] = []
+      let used = 0
+      let lo = 0
+      let hi = blocks.length - 1
+      while (lo <= hi) {
+        const takeHead = head.length <= tail.length
+        const b = takeHead ? blocks[lo] : blocks[hi]
+        if (used + b.length + 1 > budget) break
+        used += b.length + 1
+        if (takeHead) {
+          head.push(blocks[lo])
+          lo++
+        } else {
+          tail.unshift(blocks[hi])
+          hi--
+        }
+      }
+      const omitted = hi - lo + 1
+      return {
+        text: [...head, `[... ${omitted} of ${blocks.length} messages omitted ...]`, ...tail].join("\n"),
+        messages: messages.length,
+      }
+    }
+    return { text: blocks.join("\n"), messages: messages.length }
   }
 
   function sessionWhitelist(directory?: string): Set<string> | null {
@@ -740,7 +860,9 @@ export const RecallPlugin: Plugin = async () => {
               ...g.hits.map((h) => `   [${h.via}] ${h.snippet}`),
             )
           })
-          lines.push(`\nUse recall_expand with a session_id (+ optional message_id) to read the surrounding transcript.`)
+          lines.push(
+            `\nUse recall_expand with a session_id (+ optional message_id) to read the surrounding transcript, or recall_summarize for the whole-session story.`,
+          )
           return { title: `recall: ${args.query}`, output: lines.join("\n") }
         },
       }),
@@ -758,20 +880,7 @@ export const RecallPlugin: Plugin = async () => {
           max_chars: tool.schema.number().optional().describe("Max characters per message (default 800)"),
         },
         async execute(args) {
-          // Slugs are NOT unique across sessions; prefer exact id, else newest slug match.
-          const candidates = srcDb
-            .query(
-              `SELECT id, slug, title, directory, time_created, time_updated FROM session
-               WHERE id=? OR slug=? ORDER BY (id=?) DESC, time_updated DESC LIMIT 5`,
-            )
-            .all(args.session_id, args.session_id, args.session_id) as {
-            id: string
-            slug: string
-            title: string
-            directory: string
-            time_created: number
-            time_updated: number
-          }[]
+          const candidates = findSession(args.session_id)
           const s = candidates[0]
           if (!s) return `No session found for '${args.session_id}'.`
           const ambiguous =
@@ -807,44 +916,114 @@ export const RecallPlugin: Plugin = async () => {
           ]
           let budget = 20_000
           for (const m of slice) {
-            const parts = srcDb
-              .query(`SELECT data FROM part WHERE message_id=? ORDER BY time_created, id`)
-              .all(m.id) as { data: string }[]
-            const texts: string[] = []
-            const tools: string[] = []
-            let lastTool = ""
-            let lastToolCount = 0
-            const flushTool = () => {
-              if (!lastToolCount) return
-              tools.push(lastToolCount > 1 ? `${lastTool} (×${lastToolCount})` : lastTool)
-              lastToolCount = 0
-            }
-            for (const p of parts) {
-              try {
-                const d = JSON.parse(p.data)
-                if (d.type === "text" && typeof d.text === "string" && d.text.trim()) texts.push(d.text)
-                else if (d.type === "tool" && d.tool) {
-                  const line = `[tool ${d.tool}] ${clean(String(d.state?.title ?? ""), 80)}`.trimEnd()
-                  if (line === lastTool) lastToolCount++
-                  else {
-                    flushTool()
-                    lastTool = line
-                    lastToolCount = 1
-                  }
-                }
-              } catch {}
-            }
-            flushTool()
-            const header = `── ${m.role ?? "assistant"} @ ${fmtDateTime(m.time_created)} (${m.id})`
-            const body = [...tools, texts.length ? clean(texts.join("\n"), maxChars) : ""].filter(Boolean).join("\n")
-            if (!body) continue
-            const block = `${header}\n${body}\n`
+            const rendered = renderMessage(m, maxChars)
+            if (!rendered) continue
+            const block = `${rendered}\n`
             if (block.length > budget) break
             budget -= block.length
             lines.push(block)
           }
           lines.push(`(widen with window=${Math.min(window * 2, 60)} or center on another message_id)`)
           return { title: `recall: ${s.title}`, output: lines.join("\n") }
+        },
+      }),
+
+      recall_summarize: tool({
+        description:
+          "Summarize an entire past OpenCode session — or answer a focused question about it — without reading the transcript yourself. Offloads to a cheap, fast, large-context model (GLM-5.2 via OpenCode Go) in an ephemeral tool-less worker session; results are cached so repeat calls are instant. Prefer this over paging recall_expand when you need the story of a whole session ('what did we do/decide there?'); use recall_expand for verbatim excerpts.",
+        args: {
+          session_id: tool.schema.string().describe("Session id (ses_...) or slug from recall_search"),
+          focus: tool.schema
+            .string()
+            .optional()
+            .describe(
+              "Optional question to answer from the session instead of a general summary, e.g. 'what did we decide about auth?'",
+            ),
+          refresh: tool.schema.boolean().optional().describe("Bypass the cache and re-summarize (default false)"),
+        },
+        async execute(args) {
+          if (!client?.session)
+            return "recall_summarize is unavailable: no opencode server client in this context."
+          const candidates = findSession(args.session_id)
+          const s = candidates[0]
+          if (!s) return `No session found for '${args.session_id}'.`
+          const ambiguous =
+            s.id !== args.session_id && candidates.length > 1
+              ? `NOTE: ${candidates.length}+ sessions share slug '${args.session_id}'; summarizing the most recent (${s.id}).\n`
+              : ""
+          const focus = (args.focus ?? "").trim()
+          const modelTag = `${SUMMARY_MODEL.providerID}/${SUMMARY_MODEL.modelID}`
+          const header =
+            ambiguous +
+            `# ${s.title}\nsession_id=${s.id} slug=${s.slug} · ${shortDir(s.directory)} · ${fmtDate(s.time_created)} → ${fmtDate(s.time_updated)}`
+
+          const cached = idxDb
+            .query(`SELECT time_updated, summary, created FROM summaries WHERE session_id=? AND model=? AND focus=?`)
+            .get(s.id, modelTag, focus) as { time_updated: number; summary: string; created: number } | null
+          if (cached && cached.time_updated === s.time_updated && !args.refresh)
+            return {
+              title: `recall summary: ${s.title}`,
+              output: `${header}\n(cached ${fmtDateTime(cached.created)} · ${modelTag}${focus ? ` · focus: ${focus}` : ""})\n\n${cached.summary}`,
+            }
+
+          const { text: transcript, messages } = fullTranscript(s.id, SUMMARY_CHAR_BUDGET)
+          if (!transcript) return `Session ${s.id} has no transcript content.`
+          const system = focus
+            ? "You answer questions about a recorded OpenCode agent session transcript. Answer ONLY from the transcript. Be specific: name files, commands, ids, and decisions. If the transcript does not contain the answer, say so plainly. No preamble."
+            : "You summarize recorded OpenCode agent session transcripts. Produce a tight summary structured as: Goal; What was done (bullets); Key decisions & why; Gotchas/discoveries; Final state; Loose ends. Be specific — name files, commands, and ids. At most 350 words. No preamble."
+          const task = `${focus ? `QUESTION: ${focus}` : "Summarize this session."}\n\nSESSION: ${s.title} (${shortDir(s.directory)}, ${fmtDate(s.time_created)})\nTRANSCRIPT:\n${transcript}`
+
+          const t0 = performance.now()
+          const created = await client.session.create({ body: { title: `${WORKER_PREFIX}${s.id}` } })
+          const worker: string | undefined = created?.data?.id
+          if (!worker)
+            return `Failed to create summarizer worker session: ${clean(JSON.stringify(created?.error ?? created ?? null), 300)}`
+          let summary = ""
+          try {
+            const res: any = await Promise.race([
+              client.session.prompt({
+                path: { id: worker },
+                body: {
+                  model: SUMMARY_MODEL,
+                  system,
+                  tools: { "*": false },
+                  parts: [{ type: "text", text: task }],
+                },
+              }),
+              Bun.sleep(SUMMARY_TIMEOUT_MS).then(() => {
+                throw new Error(`summarizer timed out after ${SUMMARY_TIMEOUT_MS / 1000}s`)
+              }),
+            ])
+            if (res?.error) throw new Error(clean(JSON.stringify(res.error), 300))
+            const parts: any[] = res?.data?.parts ?? []
+            summary = parts
+              .filter((p) => p.type === "text" && typeof p.text === "string")
+              .map((p) => p.text)
+              .join("\n")
+              .trim()
+            if (!summary) {
+              const err = res?.data?.info?.error
+              throw new Error(err ? clean(JSON.stringify(err), 300) : "summarizer returned no text")
+            }
+          } catch (e) {
+            log("summarize failed", s.id, e)
+            return `Summarization failed: ${e instanceof Error ? e.message : String(e)}`
+          } finally {
+            void client.session
+              .delete({ path: { id: worker } })
+              .catch((e: unknown) => log("summarizer worker delete failed", worker, e))
+          }
+          idxDb.run(
+            `INSERT INTO summaries(session_id,model,focus,time_updated,summary,created) VALUES (?,?,?,?,?,?)
+             ON CONFLICT(session_id,model,focus) DO UPDATE SET time_updated=excluded.time_updated,
+               summary=excluded.summary, created=excluded.created`,
+            [s.id, modelTag, focus, s.time_updated, summary, Date.now()],
+          )
+          const secs = ((performance.now() - t0) / 1000).toFixed(1)
+          return {
+            title: `recall summary: ${s.title}`,
+            output: `${header}\n(fresh · ${modelTag} · ${messages} messages · ${secs}s${focus ? ` · focus: ${focus}` : ""})\n\n${summary}`,
+          }
         },
       }),
 
@@ -865,6 +1044,7 @@ export const RecallPlugin: Plugin = async () => {
             `backfill: ${backfillState.running ? `running ${backfillState.done}/${backfillState.total}` : backfillState.lastRun ? `idle (last run ${fmtDateTime(backfillState.lastRun)})` : "not yet run"}`,
             backfillState.lastError ? `last error: ${clean(backfillState.lastError, 200)}` : "",
             `model: ${MODEL} (${DIMS}d, q8) — ${embedderP ? "loaded" : "not loaded"}`,
+            `summaries cached: ${(idxDb.query(`SELECT count(*) c FROM summaries`).get() as { c: number }).c} (${SUMMARY_MODEL.providerID}/${SUMMARY_MODEL.modelID})`,
             `index size: ${(size / 1024 / 1024).toFixed(1)} MB at ${shortDir(DATA_DIR)}`,
             `process RSS: ${Math.round(process.memoryUsage.rss() / 1024 / 1024)} MB`,
           ].filter(Boolean)
