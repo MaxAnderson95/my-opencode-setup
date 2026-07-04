@@ -1,60 +1,72 @@
 # my-opencode-setup
 
-My personal [OpenCode](https://opencode.ai) plugins, skills, slash commands, theme, and a sample TUI config.
+Personal [OpenCode](https://opencode.ai) plugins, skills, slash commands, and a theme — packaged so you can cherry-pick the pieces you want. Everything is self-contained: one folder per plugin/skill, each with its own metadata.
+
+> **Platform:** built and tested on **macOS**. A few plugins/skills are macOS-specific (flagged in the tables below); the rest are cross-platform.
+
+## Requirements
+
+- **OpenCode** ≥ 1.3.14 (each plugin declares `engines.opencode`); developed against 1.17.x.
+- **[Bun](https://bun.sh)** — resolves plugin dependencies (`bun install`) and is the runtime for several plugins (`bun:sqlite`, `Bun.spawn`).
+- Individual plugins/skills may need extra tools — see the **Requires / config** column in each table.
 
 ## Contents
 
 ```
 my-opencode-setup/
-├── plugins/          OpenCode plugins — one folder per plugin, each with its own package.json
-├── skills/           OpenCode skills — one folder per skill (SKILL.md)
+├── plugins/          One folder per plugin, each with its own package.json
+├── skills/           One folder per skill (SKILL.md)
 ├── commands/         Slash commands paired with the plugins
 ├── themes/           Custom theme
 ├── link.sh           Symlinks the plugins and skills into your OpenCode config
 └── tui.example.jsonc Sample tui.jsonc showing how to wire everything together
 ```
 
-Every plugin is a self-contained folder (`plugins/<name>/`) with its own `package.json`. There are two kinds, and they load differently — see [Install](#install).
-
 ## Server plugins
 
-Regular plugins that hook OpenCode's event/tool system. OpenCode auto-discovers them by scanning `plugins/*.{ts,js}` (**top-level files only**, but it follows symlinks), so each one is symlinked into `~/.config/opencode/plugins/<name>.ts` pointing at the folder's inner source file.
+Regular plugins that hook OpenCode's event/tool system. OpenCode auto-discovers them by scanning `plugins/*.{ts,js}` (**top-level files only**, but it follows symlinks), so each is symlinked into `~/.config/opencode/plugins/<name>.ts` pointing at the folder's inner source file.
 
-| Plugin | Description |
-|---|---|
-| `brrr/` | Posts session lifecycle events to a [brrr.now](https://brrr.now) webhook so I get phone notifications when a session goes idle. Requires `BRRR_WEBHOOK_SECRET`. |
-| `caffeinate/` | Keeps macOS awake while sessions are working. One `caffeinate -di` process per session; the machine can sleep again once every session is idle. |
-| `current-session-id/` | Exposes the current session ID as the `get_opencode_current_session_id` tool and injects it into the system prompt so the agent can reference it without spending a tool call. |
-| `ghostty-progress/` | Drives Ghostty's OSC 9;4 progress-bar indicator while sessions are working. Requires Ghostty 1.2.0+. |
-| `mcp-lazy/` | Model-controlled MCP server enable/disable so only in-use servers cost tool-schema context. Injects a per-turn Active/Available MCP block and adds `mcp_enable` / `mcp_disable` tools; always-on servers (`enabled !== false`) are protected from disable. |
-| `recall/` | Long-term conversational memory: hybrid lexical (FTS5/BM25) + semantic (local embeddings via transformers.js) search over **every past OpenCode conversation on the machine**, exposed as `recall_search`, `recall_expand`, and `recall_status`. Fully local — reads the OpenCode DB read-only into a sidecar index; the only network access is a one-time model download. Full docs: [plugins/recall/README.md](plugins/recall/README.md). |
-| `sensitive-file-guard/` | Blocks LLM reads, edits, and copy-into-bash of `.env`, private keys, kubeconfigs, and similar files. Adds a `list_env_keys` tool so the agent can still inspect env-file shape (keys only, never values). |
-| `tool-timing/` | Appends wall-clock duration to every tool call's title so the TUI shows how long each step took. Works for both native and MCP tools. |
+| Plugin | Description | Requires / config |
+|---|---|---|
+| [`brrr/`](plugins/brrr/README.md) | Push notifications to a [brrr.now](https://brrr.now) webhook when a long-running session finishes, needs permission, asks a question, or errors — so you get pinged on your phone. | `BRRR_WEBHOOK_SECRET` env (no-op without it); a brrr.now account. |
+| `caffeinate/` | Keeps macOS awake while sessions are working (one `caffeinate -di` per session; sleeps once all are idle). | **macOS** |
+| `current-session-id/` | Exposes the `get_opencode_current_session_id` tool and injects the current session ID into the system prompt. | — |
+| `ghostty-progress/` | Drives Ghostty's OSC 9;4 progress-bar indicator while sessions work. | **Ghostty 1.2.0+** |
+| [`mcp-lazy/`](plugins/mcp-lazy/README.md) | Model-controlled MCP server enable/disable so only in-use servers cost tool-schema context. Adds `mcp_enable` / `mcp_disable`. | — |
+| [`recall/`](plugins/recall/README.md) | Long-term conversational memory: hybrid lexical (FTS5/BM25) + semantic (local transformers.js embeddings) search over every past OpenCode conversation. Adds `recall_search` / `recall_expand` / `recall_status`. | One-time ~model download; reads the OpenCode DB read-only. |
+| [`sensitive-file-guard/`](plugins/sensitive-file-guard/README.md) | Blocks LLM reads, edits, and copy-into-bash of `.env`, private keys, kubeconfigs, etc. Adds `list_env_keys` (keys only, never values). | Optional `protected` / `blockCopy` config. |
+| `tool-timing/` | Appends wall-clock duration to every tool call's title (works for native and MCP tools). | — |
 
 ## TUI plugins
 
 These use the [`@opentui/solid`](https://github.com/sst/opencode) JSX runtime and expose a `./tui` entrypoint via their `package.json`. They are **not** auto-scanned — you symlink the whole directory and list it in `tui.jsonc`.
 
-| Plugin | Description |
-|---|---|
-| `elapsed-timer/` | Shows running session duration in the TUI sidebar. |
-| `local-session-commands/` | Handles `/open [path]` and `/delete` directly in the TUI without sending command templates to the LLM. |
-| `session-id-badge/` | Shows the current session ID in the TUI sidebar. |
-| `tokens-per-sec/` | Live tokens-per-second display with a sliding-window average, useful for benchmarking models. |
+| Plugin | Description | Requires |
+|---|---|---|
+| `elapsed-timer/` | Running session duration in the TUI sidebar. | — |
+| `local-session-commands/` | Handles `/open [path]` and `/delete` directly in the TUI (no LLM round-trip). | **macOS** for `/open` (`open`) |
+| `session-id-badge/` | Current session ID in the TUI sidebar. | — |
+| `tokens-per-sec/` | Live tokens-per-second with a sliding-window average (handy for benchmarking models). | — |
 
 ## Skills
 
-Reusable instruction sets the agent loads on demand. `link.sh` symlinks each `skills/<name>/` into `~/.config/opencode/skills/<name>`.
+Instruction sets the agent loads on demand. `link.sh` symlinks each `skills/<name>/` into `~/.config/opencode/skills/<name>`.
 
-| Skill | Description |
-|---|---|
-| `opencode-db-querying/` | Schema and ready-to-run SQL for OpenCode's local SQLite DB (sessions, messages, parts, projects, todos, tokens/cost), so the agent can query conversation history precisely without rediscovering the schema. Complements the `recall/` plugin's fuzzy search. |
+| Skill | Description | Requires |
+|---|---|---|
+| `opencode-db-querying/` | Schema + ready-to-run SQL for OpenCode's local SQLite DB (sessions, messages, parts, projects, todos, tokens/cost). Complements `recall/` with precise SQL. | `opencode` CLI or `sqlite3` |
+| `macos-root/` | Run commands as root via `osascript` (because `sudo` can't prompt for a password inside OpenCode). | **macOS** |
+| `md2pdf/` | Format/style Markdown for the `md2pdf` CLI (Markdown → HTML → headless Chrome → PDF). | `md2pdf` CLI + Chrome |
+| `pdf-reports/` | Author PDF reports by writing Markdown and converting with `md2pdf`. | `md2pdf` CLI |
+| `openusage/` | Report AI-subscription usage/limits by reading the local OpenUsage menu-bar app's HTTP API. | **macOS** + the OpenUsage app |
+
+> `md2pdf` and `openusage` target specific local tools (a personal `md2pdf` CLI and the OpenUsage menu-bar app); they're only useful if you run those tools.
 
 ## Commands
 
-Slash commands that pair with the plugins above:
+Slash commands that pair with the TUI plugins:
 
-| File | Triggers | Plugin it relies on |
+| File | Triggers | Relies on |
 |---|---|---|
 | `commands/delete.md` | `/delete` | `local-session-commands/` |
 | `commands/open.md` | `/open [path]` | `local-session-commands/` |
@@ -63,11 +75,11 @@ Without the matching TUI plugin, the command falls back to sending its template 
 
 ## Theme
 
-`themes/ayu-max-custom.json` — a customised [Ayu](https://github.com/ayu-theme/ayu-colors)-style theme with both dark and light variants.
+`themes/ayu-max-custom.json` — a customised [Ayu](https://github.com/ayu-theme/ayu-colors)-style theme with dark and light variants.
 
 ## Install
 
-Clone the repo somewhere persistent, then symlink each piece into its OpenCode location.
+Clone the repo somewhere persistent, then wire it into your OpenCode config.
 
 ```bash
 git clone https://github.com/MaxAnderson95/my-opencode-setup.git ~/my-opencode-setup
@@ -78,7 +90,7 @@ bun install            # resolves @opencode-ai/plugin, transformers.js, etc.
 
 `link.sh` handles each kind automatically:
 
-- **Server plugins** → symlinks the inner file, e.g. `plugins/tool-timing/tool-timing.ts` → `~/.config/opencode/plugins/tool-timing.ts`. This is required because the loader's auto-scan matches only top-level `plugins/*.{ts,js}` — symlinking the whole `plugins/` directory would leave the nested server plugins undiscovered.
+- **Server plugins** → symlinks the inner file, e.g. `plugins/tool-timing/tool-timing.ts` → `~/.config/opencode/plugins/tool-timing.ts`. Required because the loader's auto-scan matches only top-level `plugins/*.{ts,js}` — symlinking the whole `plugins/` directory would leave the nested server plugins undiscovered.
 - **TUI plugins** → symlinks the directory, e.g. `plugins/elapsed-timer` → `~/.config/opencode/plugins/elapsed-timer`, and reminds you to add it to `tui.jsonc`.
 - **Skills** → symlinks the directory, e.g. `skills/opencode-db-querying` → `~/.config/opencode/skills/opencode-db-querying`.
 
@@ -96,13 +108,19 @@ Then wire up the theme and TUI plugins in `tui.jsonc` (see [`tui.example.jsonc`]
 }
 ```
 
-And symlink the slash commands (only useful if you also installed the paired TUI plugin):
+And symlink the slash commands and theme (commands only matter if you installed the paired TUI plugin):
 
 ```bash
 ln -s "$PWD/commands/delete.md" ~/.config/opencode/commands/delete.md
 ln -s "$PWD/commands/open.md"   ~/.config/opencode/commands/open.md
 ln -s "$PWD/themes/ayu-max-custom.json" ~/.config/opencode/themes/ayu-max-custom.json
 ```
+
+## How plugins load (for adapters)
+
+OpenCode discovers **server plugins** two ways: an explicit entry in `opencode.jsonc`'s `plugin[]` (a `file://` path or npm spec), or the auto-scan of `{plugin,plugins}/*.{ts,js}` (top-level files only, follows symlinks). **TUI plugins** are never auto-scanned — they expose `exports["./tui"]` and are listed in `tui.jsonc`'s `plugin[]` as `file://` **directory** paths.
+
+That's why server plugins here are folders in the repo but symlinked by their **inner file**: the folder gives each plugin its own `package.json` (name, `main`, `engines`, peer deps) while the inner-file symlink keeps the auto-scan working. Passing config to a plugin (e.g. `sensitive-file-guard`) requires listing it explicitly in `opencode.jsonc` with the `["<spec>", { …options }]` form — see that plugin's README.
 
 ## License
 
