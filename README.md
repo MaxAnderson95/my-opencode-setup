@@ -1,15 +1,16 @@
 # my-opencode-setup
 
-My personal [OpenCode](https://opencode.ai) plugins, slash commands, theme, and a sample TUI config.
+My personal [OpenCode](https://opencode.ai) plugins, skills, slash commands, theme, and a sample TUI config.
 
 ## Contents
 
 ```
 my-opencode-setup/
 ├── plugins/          OpenCode plugins — one folder per plugin, each with its own package.json
+├── skills/           OpenCode skills — one folder per skill (SKILL.md)
 ├── commands/         Slash commands paired with the plugins
 ├── themes/           Custom theme
-├── link.sh           Symlinks each plugin into your OpenCode config
+├── link.sh           Symlinks the plugins and skills into your OpenCode config
 └── tui.example.jsonc Sample tui.jsonc showing how to wire everything together
 ```
 
@@ -41,6 +42,14 @@ These use the [`@opentui/solid`](https://github.com/sst/opencode) JSX runtime an
 | `session-id-badge/` | Shows the current session ID in the TUI sidebar. |
 | `tokens-per-sec/` | Live tokens-per-second display with a sliding-window average, useful for benchmarking models. |
 
+## Skills
+
+Reusable instruction sets the agent loads on demand. `link.sh` symlinks each `skills/<name>/` into `~/.config/opencode/skills/<name>`.
+
+| Skill | Description |
+|---|---|
+| `opencode-db-querying/` | Schema and ready-to-run SQL for OpenCode's local SQLite DB (sessions, messages, parts, projects, todos, tokens/cost), so the agent can query conversation history precisely without rediscovering the schema. Complements the `recall/` plugin's fuzzy search. |
+
 ## Commands
 
 Slash commands that pair with the plugins above:
@@ -64,13 +73,14 @@ Clone the repo somewhere persistent, then symlink each piece into its OpenCode l
 git clone https://github.com/MaxAnderson95/my-opencode-setup.git ~/my-opencode-setup
 cd ~/my-opencode-setup
 bun install            # resolves @opencode-ai/plugin, transformers.js, etc.
-./link.sh              # symlinks every plugin into ~/.config/opencode/plugins/
+./link.sh              # symlinks plugins and skills into ~/.config/opencode/
 ```
 
-`link.sh` handles both kinds automatically:
+`link.sh` handles each kind automatically:
 
 - **Server plugins** → symlinks the inner file, e.g. `plugins/tool-timing/tool-timing.ts` → `~/.config/opencode/plugins/tool-timing.ts`. This is required because the loader's auto-scan matches only top-level `plugins/*.{ts,js}` — symlinking the whole `plugins/` directory would leave the nested server plugins undiscovered.
 - **TUI plugins** → symlinks the directory, e.g. `plugins/elapsed-timer` → `~/.config/opencode/plugins/elapsed-timer`, and reminds you to add it to `tui.jsonc`.
+- **Skills** → symlinks the directory, e.g. `skills/opencode-db-querying` → `~/.config/opencode/skills/opencode-db-querying`.
 
 Then wire up the theme and TUI plugins in `tui.jsonc` (see [`tui.example.jsonc`](tui.example.jsonc)):
 
