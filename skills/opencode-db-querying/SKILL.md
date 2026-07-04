@@ -93,6 +93,22 @@ WHERE directory LIKE '%/my-repo%'          -- omit line for all
 ORDER BY time_created DESC LIMIT 20;
 ```
 
+**Sessions active in a date window (with substance signals):**
+```sql
+SELECT s.id, s.directory, s.title,
+       count(*) AS msgs,
+       sum(json_extract(m.data,'$.role')='user') AS user_turns,
+       datetime(min(m.time_created)/1000,'unixepoch','localtime') AS first_active,
+       datetime(max(m.time_created)/1000,'unixepoch','localtime') AS last_active
+FROM session s JOIN message m ON m.session_id = s.id
+WHERE s.parent_id IS NULL                  -- top-level only; drop to include sub-agents
+  AND datetime(m.time_created/1000,'unixepoch','localtime') >= '2026-06-26 18:00:00'
+  AND datetime(m.time_created/1000,'unixepoch','localtime') <  '2026-07-03 22:00:00'
+GROUP BY s.id
+ORDER BY last_active;
+```
+Windows on **message activity**, not `session.time_created/updated` — a long-running session scopes to its in-window work, and `first_active`/`last_active` are true work dates. `msgs`/`user_turns` separate substantive sessions from trivia. Don't use `session.cost` for this: subscription-auth sessions record `0.00` for real work.
+
 **Look up a session by id or slug:**
 ```sql
 SELECT id, title, directory, agent, model FROM session WHERE id = 'ses_XXXX';
