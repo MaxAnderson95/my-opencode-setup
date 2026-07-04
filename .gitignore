@@ -1,3 +1,4 @@
 node_modules/
 *.log
 .DS_Store
+plugins/tokens-per-sec/calibration.json
