@@ -25,7 +25,6 @@ Regular plugins that hook OpenCode's event/tool system. OpenCode auto-discovers 
 | `caffeinate/` | Keeps macOS awake while sessions are working. One `caffeinate -di` process per session; the machine can sleep again once every session is idle. |
 | `current-session-id/` | Exposes the current session ID as the `get_opencode_current_session_id` tool and injects it into the system prompt so the agent can reference it without spending a tool call. |
 | `delete-session/` | Compatibility stub retained for older installs. `/delete` is handled by `local-session-commands/`. |
-| `engram/` | Thin adapter connecting OpenCode's event system to the [Engram](https://github.com/) persistent-memory binary (a local HTTP server backed by SQLite). Injects the memory protocol into context and forwards lifecycle events. |
 | `ghostty-progress/` | Drives Ghostty's OSC 9;4 progress-bar indicator while sessions are working. Requires Ghostty 1.2.0+. |
 | `mcp-lazy/` | Model-controlled MCP server enable/disable so only in-use servers cost tool-schema context. Injects a per-turn Active/Available MCP block and adds `mcp_enable` / `mcp_disable` tools; always-on servers (`enabled !== false`) are protected from disable. |
 | `open-in-finder/` | Compatibility stub retained for older installs. `/open` is handled by `local-session-commands/`. |
