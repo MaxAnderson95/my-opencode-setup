@@ -33,7 +33,7 @@ Regular plugins that hook OpenCode's event/tool system. OpenCode auto-discovers 
 | `current-session-id/` | Exposes the `get_opencode_current_session_id` tool and injects the current session ID into the system prompt. | — |
 | `ghostty-progress/` | Drives Ghostty's OSC 9;4 progress-bar indicator while sessions work. | **Ghostty 1.2.0+** |
 | [`mcp-lazy/`](plugins/mcp-lazy/README.md) | Model-controlled MCP server enable/disable so only in-use servers cost tool-schema context. Adds `mcp_enable` / `mcp_disable`. | — |
-| [`recall/`](plugins/recall/README.md) | Long-term conversational memory: hybrid lexical (FTS5/BM25) + semantic (local transformers.js embeddings) search over every past OpenCode conversation. Adds `recall_search` / `recall_expand` / `recall_status`. | One-time ~model download; reads the OpenCode DB read-only. |
+| [`recall/`](plugins/recall/README.md) | Long-term conversational memory: hybrid lexical (FTS5/BM25) + semantic (local transformers.js embeddings) search over every past OpenCode conversation. Adds `recall_search` / `recall_expand` / `recall_summarize` / `recall_status`. Summaries offload to GLM-5.2 via OpenCode Go in an ephemeral worker, cached permanently. | One-time ~model download; reads the OpenCode DB read-only. |
 | [`sensitive-file-guard/`](plugins/sensitive-file-guard/README.md) | Blocks LLM reads, edits, and copy-into-bash of `.env`, private keys, kubeconfigs, etc. Adds `list_env_keys` (keys only, never values). | Optional `protected` / `blockCopy` config. |
 | `tool-timing/` | Appends wall-clock duration to every tool call's title (works for native and MCP tools). | — |
 

@@ -36,9 +36,28 @@ Reads a transcript excerpt around a hit: user/assistant turns with timestamps an
 
 Slugs are not unique across sessions; an exact id always wins, otherwise the newest slug match is shown and alternates are listed.
 
+### `recall_summarize`
+
+Summarizes an entire session — or answers a focused question about it — by offloading to a cheap, fast, large-context model (**GLM-5.2 via OpenCode Go**, provider `opencode-go`; deliberately not OpenCode Zen) instead of spending the main model's context on transcript reading.
+
+| Arg | Default | Description |
+|---|---|---|
+| `session_id` | — | `ses_...` id or slug (same resolution rules as `recall_expand`) |
+| `focus` | — | Optional question to answer from the transcript instead of a general summary |
+| `refresh` | `false` | Bypass the cache and re-summarize |
+
+Mechanics:
+
+- The transcript is compacted (collapsed tool one-liners, trimmed text) and middle-out truncated to a 300k-char budget — goals live at the start of a session, outcomes at the end, so the middle goes first.
+- The prompt runs in an **ephemeral worker session** via the server API with `tools: {"*": false}` (the worker model cannot call tools) and a purpose-built system prompt; the worker session is deleted afterwards and is never indexed by recall.
+- Results are **cached permanently** in the sidecar DB keyed by `(session_id, model, focus)` and invalidated only if the source session's `time_updated` changes. Repeat calls are instant and free.
+- Sizing: a 16-message session summarizes in ~9 s fresh, focused questions in ~2 s, cache hits in ~0 s.
+
+The economics vs. eager per-session summaries (the Engram model): summaries are generated lazily, only for sessions someone actually asks about, by a near-free model, and never expire.
+
 ### `recall_status`
 
-Index health: sessions/chunks indexed, backfill progress, embedder state, index size on disk, process RSS.
+Index health: sessions/chunks indexed, backfill progress, embedder state, summary-cache count, index size on disk, process RSS.
 
 ## How it works
 
@@ -60,13 +79,15 @@ Index health: sessions/chunks indexed, backfill progress, embedder state, index 
 
 ## Install
 
-The OpenCode plugin loader only picks up top-level `plugins/*.ts` files — symlink the file, not the directory:
+From the repo root, `bun install && ./link.sh` handles everything. Manually, that amounts to symlinking the inner file (the loader only auto-scans top-level `plugins/*.ts`):
 
 ```bash
 ln -s "$PWD/plugins/recall/recall.ts" ~/.config/opencode/plugins/recall.ts
 ```
 
-`@huggingface/transformers` must be resolvable from the plugin file — it's in this repo's `package.json`, so `bun install` at the repo root covers it. Lifecycle scripts can stay blocked/ignored: `onnxruntime-node` ships a prebuilt darwin-arm64 binding.
+`@huggingface/transformers` must be resolvable from the plugin file's real path — `bun install` at the repo root covers it. Lifecycle scripts can stay blocked/ignored: `onnxruntime-node` ships prebuilt bindings.
+
+`recall_summarize` needs no extra setup beyond an OpenCode Go subscription — it prompts `opencode-go/glm-5.2` through the local server API using your existing auth. The other three tools work without it.
 
 Restart opencode. First search triggers the model download; the initial backfill starts automatically ~20 s after launch. Sizing from this machine: ~2,100 sessions → ~10k embedded chunks, ~183k FTS rows, ~465 MB index, ~6 minutes one-time backfill on an M-series Mac.
 
