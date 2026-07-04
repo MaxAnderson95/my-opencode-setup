@@ -50,6 +50,8 @@ const SUMMARY_MODEL = { providerID: "opencode-go", modelID: "glm-5.2" }
 const SUMMARY_CHAR_BUDGET = 300_000
 const SUMMARY_MSG_CHARS = 2_000
 const SUMMARY_TIMEOUT_MS = 180_000
+const SUMMARY_CONCURRENCY = 4
+const SUMMARY_BATCH_MAX = 24
 const WORKER_PREFIX = "recall-summarizer worker: "
 
 // ---------------------------------------------------------------- utilities
@@ -613,6 +615,107 @@ export const RecallPlugin: Plugin = async (input) => {
     return { text: blocks.join("\n"), messages: messages.length }
   }
 
+  // ------------------------------------------------------------ summarizer
+
+  type SummaryResult = { summary: string; cachedAt?: number; secs?: number; messages?: number }
+  // In-flight dedupe: concurrent requests for the same (session, focus) share one worker.
+  const inFlightSummaries = new Map<string, Promise<SummaryResult>>()
+  const summaryModelTag = `${SUMMARY_MODEL.providerID}/${SUMMARY_MODEL.modelID}`
+
+  /** Summarize one session via an ephemeral tool-less worker; cached permanently. */
+  function summarizeSession(s: SessionRow, focus: string, refresh: boolean, abort?: AbortSignal): Promise<SummaryResult> {
+    const key = `${s.id}\u0000${focus}`
+    if (!refresh) {
+      const cached = idxDb
+        .query(`SELECT time_updated, summary, created FROM summaries WHERE session_id=? AND model=? AND focus=?`)
+        .get(s.id, summaryModelTag, focus) as { time_updated: number; summary: string; created: number } | null
+      if (cached && cached.time_updated === s.time_updated)
+        return Promise.resolve({ summary: cached.summary, cachedAt: cached.created })
+      const inflight = inFlightSummaries.get(key)
+      if (inflight) return inflight
+    }
+    const p = (async (): Promise<SummaryResult> => {
+      const { text: transcript, messages } = fullTranscript(s.id, SUMMARY_CHAR_BUDGET)
+      if (!transcript) throw new Error("session has no transcript content")
+      const system = focus
+        ? "You answer questions about a recorded OpenCode agent session transcript. Answer ONLY from the transcript. Be specific: name files, commands, ids, and decisions. If the transcript does not contain the answer, say so plainly. No preamble."
+        : "You summarize recorded OpenCode agent session transcripts. Produce a tight summary structured as: Goal; What was done (bullets); Key decisions & why; Gotchas/discoveries; Final state; Loose ends. Be specific — name files, commands, and ids. At most 350 words. No preamble."
+      const task = `${focus ? `QUESTION: ${focus}` : "Summarize this session."}\n\nSESSION: ${s.title} (${shortDir(s.directory)}, ${fmtDate(s.time_created)})\nTRANSCRIPT:\n${transcript}`
+
+      if (abort?.aborted) throw new Error("aborted")
+      const t0 = performance.now()
+      const created = await client.session.create({ body: { title: `${WORKER_PREFIX}${s.id}` } })
+      const worker: string | undefined = created?.data?.id
+      if (!worker)
+        throw new Error(`failed to create worker session: ${clean(JSON.stringify(created?.error ?? created ?? null), 300)}`)
+      try {
+        const racers: Promise<any>[] = [
+          client.session.prompt({
+            path: { id: worker },
+            body: {
+              model: SUMMARY_MODEL,
+              system,
+              tools: { "*": false },
+              parts: [{ type: "text", text: task }],
+            },
+          }),
+          Bun.sleep(SUMMARY_TIMEOUT_MS).then(() => {
+            throw new Error(`summarizer timed out after ${SUMMARY_TIMEOUT_MS / 1000}s`)
+          }),
+        ]
+        if (abort)
+          racers.push(
+            new Promise<never>((_, reject) =>
+              abort.addEventListener("abort", () => reject(new Error("aborted")), { once: true }),
+            ),
+          )
+        const res: any = await Promise.race(racers)
+        if (res?.error) throw new Error(clean(JSON.stringify(res.error), 300))
+        const parts: any[] = res?.data?.parts ?? []
+        const summary = parts
+          .filter((p) => p.type === "text" && typeof p.text === "string")
+          .map((p) => p.text)
+          .join("\n")
+          .trim()
+        if (!summary) {
+          const err = res?.data?.info?.error
+          throw new Error(err ? clean(JSON.stringify(err), 300) : "summarizer returned no text")
+        }
+        idxDb.run(
+          `INSERT INTO summaries(session_id,model,focus,time_updated,summary,created) VALUES (?,?,?,?,?,?)
+           ON CONFLICT(session_id,model,focus) DO UPDATE SET time_updated=excluded.time_updated,
+             summary=excluded.summary, created=excluded.created`,
+          [s.id, summaryModelTag, focus, s.time_updated, summary, Date.now()],
+        )
+        return { summary, secs: (performance.now() - t0) / 1000, messages }
+      } finally {
+        void client.session
+          .delete({ path: { id: worker } })
+          .catch((e: unknown) => log("summarizer worker delete failed", worker, e))
+      }
+    })()
+    inFlightSummaries.set(key, p)
+    p.catch(() => {}).finally(() => {
+      if (inFlightSummaries.get(key) === p) inFlightSummaries.delete(key)
+    })
+    return p
+  }
+
+  /** Simple promise pool; JS is single-threaded so the shared cursor is safe. */
+  async function pool<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+    const out: R[] = new Array(items.length)
+    let next = 0
+    await Promise.all(
+      Array.from({ length: Math.min(limit, items.length) }, async () => {
+        while (next < items.length) {
+          const i = next++
+          out[i] = await fn(items[i])
+        }
+      }),
+    )
+    return out
+  }
+
   function sessionWhitelist(directory?: string): Set<string> | null {
     if (!directory) return null
     const rows = idxDb.query(`SELECT id FROM sessions WHERE directory LIKE ?`).all(`%${directory}%`) as {
@@ -930,100 +1033,67 @@ export const RecallPlugin: Plugin = async (input) => {
 
       recall_summarize: tool({
         description:
-          "Summarize an entire past OpenCode session — or answer a focused question about it — without reading the transcript yourself. Offloads to a cheap, fast, large-context model (GLM-5.2 via OpenCode Go) in an ephemeral tool-less worker session; results are cached so repeat calls are instant. Prefer this over paging recall_expand when you need the story of a whole session ('what did we do/decide there?'); use recall_expand for verbatim excerpts.",
+          "Summarize entire past OpenCode sessions — or answer a focused question about them — without reading the transcripts yourself. Offloads to a cheap, fast, large-context model (GLM-5.2 via OpenCode Go) in ephemeral tool-less worker sessions; results are cached so repeat calls are instant. Batch multiple sessions in one call via session_ids (they run concurrently). Prefer this over paging recall_expand when you need the story of a whole session ('what did we do/decide there?'); use recall_expand for verbatim excerpts.",
         args: {
-          session_id: tool.schema.string().describe("Session id (ses_...) or slug from recall_search"),
+          session_id: tool.schema.string().optional().describe("Session id (ses_...) or slug from recall_search"),
+          session_ids: tool.schema
+            .string()
+            .array()
+            .optional()
+            .describe(`Batch: several session ids/slugs summarized concurrently in one call (max ${SUMMARY_BATCH_MAX})`),
           focus: tool.schema
             .string()
             .optional()
             .describe(
-              "Optional question to answer from the session instead of a general summary, e.g. 'what did we decide about auth?'",
+              "Optional question to answer from each session instead of a general summary, e.g. 'what did we decide about auth?'",
             ),
           refresh: tool.schema.boolean().optional().describe("Bypass the cache and re-summarize (default false)"),
         },
-        async execute(args) {
+        async execute(args, ctx) {
           if (!client?.session)
             return "recall_summarize is unavailable: no opencode server client in this context."
-          const candidates = findSession(args.session_id)
-          const s = candidates[0]
-          if (!s) return `No session found for '${args.session_id}'.`
-          const ambiguous =
-            s.id !== args.session_id && candidates.length > 1
-              ? `NOTE: ${candidates.length}+ sessions share slug '${args.session_id}'; summarizing the most recent (${s.id}).\n`
-              : ""
+          const ids = [...new Set([...(args.session_id ? [args.session_id] : []), ...(args.session_ids ?? [])])]
+          if (!ids.length) return "Provide session_id or session_ids."
+          if (ids.length > SUMMARY_BATCH_MAX)
+            return `Too many sessions (${ids.length}); max ${SUMMARY_BATCH_MAX} per call. Split into batches.`
           const focus = (args.focus ?? "").trim()
-          const modelTag = `${SUMMARY_MODEL.providerID}/${SUMMARY_MODEL.modelID}`
-          const header =
-            ambiguous +
-            `# ${s.title}\nsession_id=${s.id} slug=${s.slug} · ${shortDir(s.directory)} · ${fmtDate(s.time_created)} → ${fmtDate(s.time_updated)}`
+          let done = 0
 
-          const cached = idxDb
-            .query(`SELECT time_updated, summary, created FROM summaries WHERE session_id=? AND model=? AND focus=?`)
-            .get(s.id, modelTag, focus) as { time_updated: number; summary: string; created: number } | null
-          if (cached && cached.time_updated === s.time_updated && !args.refresh)
-            return {
-              title: `recall summary: ${s.title}`,
-              output: `${header}\n(cached ${fmtDateTime(cached.created)} · ${modelTag}${focus ? ` · focus: ${focus}` : ""})\n\n${cached.summary}`,
+          const renderBlock = async (idOrSlug: string): Promise<string> => {
+            try {
+              const candidates = findSession(idOrSlug)
+              const s = candidates[0]
+              if (!s) return `# ${idOrSlug}\nNo session found.`
+              const ambiguous =
+                s.id !== idOrSlug && candidates.length > 1
+                  ? `NOTE: ${candidates.length}+ sessions share slug '${idOrSlug}'; summarizing the most recent (${s.id}).\n`
+                  : ""
+              const header =
+                ambiguous +
+                `# ${s.title}\nsession_id=${s.id} slug=${s.slug} · ${shortDir(s.directory)} · ${fmtDate(s.time_created)} → ${fmtDate(s.time_updated)}`
+              const r = await summarizeSession(s, focus, args.refresh === true, ctx?.abort)
+              const status = r.cachedAt
+                ? `(cached ${fmtDateTime(r.cachedAt)} · ${summaryModelTag}${focus ? ` · focus: ${focus}` : ""})`
+                : `(fresh · ${summaryModelTag}${r.messages ? ` · ${r.messages} messages` : ""}${r.secs ? ` · ${r.secs.toFixed(1)}s` : ""}${focus ? ` · focus: ${focus}` : ""})`
+              return `${header}\n${status}\n\n${r.summary}`
+            } catch (e) {
+              log("summarize failed", idOrSlug, e)
+              return `# ${idOrSlug}\nSummarization failed: ${e instanceof Error ? e.message : String(e)}`
             }
-
-          const { text: transcript, messages } = fullTranscript(s.id, SUMMARY_CHAR_BUDGET)
-          if (!transcript) return `Session ${s.id} has no transcript content.`
-          const system = focus
-            ? "You answer questions about a recorded OpenCode agent session transcript. Answer ONLY from the transcript. Be specific: name files, commands, ids, and decisions. If the transcript does not contain the answer, say so plainly. No preamble."
-            : "You summarize recorded OpenCode agent session transcripts. Produce a tight summary structured as: Goal; What was done (bullets); Key decisions & why; Gotchas/discoveries; Final state; Loose ends. Be specific — name files, commands, and ids. At most 350 words. No preamble."
-          const task = `${focus ? `QUESTION: ${focus}` : "Summarize this session."}\n\nSESSION: ${s.title} (${shortDir(s.directory)}, ${fmtDate(s.time_created)})\nTRANSCRIPT:\n${transcript}`
-
-          const t0 = performance.now()
-          const created = await client.session.create({ body: { title: `${WORKER_PREFIX}${s.id}` } })
-          const worker: string | undefined = created?.data?.id
-          if (!worker)
-            return `Failed to create summarizer worker session: ${clean(JSON.stringify(created?.error ?? created ?? null), 300)}`
-          let summary = ""
-          try {
-            const res: any = await Promise.race([
-              client.session.prompt({
-                path: { id: worker },
-                body: {
-                  model: SUMMARY_MODEL,
-                  system,
-                  tools: { "*": false },
-                  parts: [{ type: "text", text: task }],
-                },
-              }),
-              Bun.sleep(SUMMARY_TIMEOUT_MS).then(() => {
-                throw new Error(`summarizer timed out after ${SUMMARY_TIMEOUT_MS / 1000}s`)
-              }),
-            ])
-            if (res?.error) throw new Error(clean(JSON.stringify(res.error), 300))
-            const parts: any[] = res?.data?.parts ?? []
-            summary = parts
-              .filter((p) => p.type === "text" && typeof p.text === "string")
-              .map((p) => p.text)
-              .join("\n")
-              .trim()
-            if (!summary) {
-              const err = res?.data?.info?.error
-              throw new Error(err ? clean(JSON.stringify(err), 300) : "summarizer returned no text")
-            }
-          } catch (e) {
-            log("summarize failed", s.id, e)
-            return `Summarization failed: ${e instanceof Error ? e.message : String(e)}`
-          } finally {
-            void client.session
-              .delete({ path: { id: worker } })
-              .catch((e: unknown) => log("summarizer worker delete failed", worker, e))
           }
-          idxDb.run(
-            `INSERT INTO summaries(session_id,model,focus,time_updated,summary,created) VALUES (?,?,?,?,?,?)
-             ON CONFLICT(session_id,model,focus) DO UPDATE SET time_updated=excluded.time_updated,
-               summary=excluded.summary, created=excluded.created`,
-            [s.id, modelTag, focus, s.time_updated, summary, Date.now()],
-          )
-          const secs = ((performance.now() - t0) / 1000).toFixed(1)
-          return {
-            title: `recall summary: ${s.title}`,
-            output: `${header}\n(fresh · ${modelTag} · ${messages} messages · ${secs}s${focus ? ` · focus: ${focus}` : ""})\n\n${summary}`,
+
+          const blocks = await pool(ids, SUMMARY_CONCURRENCY, async (idOrSlug) => {
+            const block = await renderBlock(idOrSlug)
+            done++
+            if (ids.length > 1) ctx?.metadata?.({ title: `recall summarize: ${done}/${ids.length}` })
+            return block
+          })
+
+          if (blocks.length === 1) {
+            const title = findSession(ids[0])[0]?.title ?? ids[0]
+            return { title: `recall summary: ${title}`, output: blocks[0] }
           }
+          return { title: `recall summaries: ${blocks.length} sessions`, output: blocks.join("\n\n---\n\n") }
         },
       }),
 
