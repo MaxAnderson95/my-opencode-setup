@@ -24,10 +24,8 @@ Regular plugins that hook OpenCode's event/tool system. OpenCode auto-discovers 
 | `brrr/` | Posts session lifecycle events to a [brrr.now](https://brrr.now) webhook so I get phone notifications when a session goes idle. Requires `BRRR_WEBHOOK_SECRET`. |
 | `caffeinate/` | Keeps macOS awake while sessions are working. One `caffeinate -di` process per session; the machine can sleep again once every session is idle. |
 | `current-session-id/` | Exposes the current session ID as the `get_opencode_current_session_id` tool and injects it into the system prompt so the agent can reference it without spending a tool call. |
-| `delete-session/` | Compatibility stub retained for older installs. `/delete` is handled by `local-session-commands/`. |
 | `ghostty-progress/` | Drives Ghostty's OSC 9;4 progress-bar indicator while sessions are working. Requires Ghostty 1.2.0+. |
 | `mcp-lazy/` | Model-controlled MCP server enable/disable so only in-use servers cost tool-schema context. Injects a per-turn Active/Available MCP block and adds `mcp_enable` / `mcp_disable` tools; always-on servers (`enabled !== false`) are protected from disable. |
-| `open-in-finder/` | Compatibility stub retained for older installs. `/open` is handled by `local-session-commands/`. |
 | `recall/` | Long-term conversational memory: hybrid lexical (FTS5/BM25) + semantic (local embeddings via transformers.js) search over **every past OpenCode conversation on the machine**, exposed as `recall_search`, `recall_expand`, and `recall_status`. Fully local — reads the OpenCode DB read-only into a sidecar index; the only network access is a one-time model download. Full docs: [plugins/recall/README.md](plugins/recall/README.md). |
 | `sensitive-file-guard/` | Blocks LLM reads, edits, and copy-into-bash of `.env`, private keys, kubeconfigs, and similar files. Adds a `list_env_keys` tool so the agent can still inspect env-file shape (keys only, never values). |
 | `tool-timing/` | Appends wall-clock duration to every tool call's title so the TUI shows how long each step took. Works for both native and MCP tools. |
