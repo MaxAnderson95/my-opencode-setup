@@ -1,6 +1,7 @@
 ---
 name: opencode-db-querying
-description: Query OpenCode's local SQLite database with SQL — conversations, sessions, messages, parts, projects, todos, tokens/cost. Use when you need structured/exact queries against the opencode DB: search past conversation text, reconstruct a full session transcript in order, look up a session by ses_ id or slug, compute token/cost stats, list projects/sessions, or inspect tool calls. Complements the recall plugin (which does fuzzy/semantic search) with precise SQL. Load this instead of re-discovering the schema through trial-and-error tool calls.
+description: >-
+  Query OpenCode's local SQLite database with SQL — conversations, sessions, messages, parts, projects, todos, tokens/cost. Use when you need structured/exact queries against the opencode DB: search past conversation text, reconstruct a full session transcript in order, look up a session by ses_ id or slug, compute token/cost stats, list projects/sessions, or inspect tool calls. Complements the recall plugin (which does fuzzy/semantic search) with precise SQL. Load this instead of re-discovering the schema through trial-and-error tool calls.
 ---
 
 # Querying the OpenCode SQLite database
