@@ -20,7 +20,7 @@ export const CurrentSessionIdPlugin: Plugin = async () => {
     //
     // We append to the last existing system entry rather than pushing a new
     // one — some models (Qwen, Mistral via llama.cpp) reject multiple system
-    // messages. Same pattern used in the Engram plugin.
+    // messages.
     "experimental.chat.system.transform": async (input, output) => {
       if (!input.sessionID) return
       // Trailing newline is mandatory: without it, the next chunk opencode
