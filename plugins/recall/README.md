@@ -43,7 +43,8 @@ Summarizes an entire session — or answers a focused question about it — by o
 | Arg | Default | Description |
 |---|---|---|
 | `session_id` | — | `ses_...` id or slug (same resolution rules as `recall_expand`) |
-| `focus` | — | Optional question to answer from the transcript instead of a general summary |
+| `session_ids` | — | Batch: several ids/slugs summarized **concurrently** in one call (max 24, 4 workers in parallel) |
+| `focus` | — | Optional question to answer from each transcript instead of a general summary |
 | `refresh` | `false` | Bypass the cache and re-summarize |
 
 Mechanics:
@@ -51,7 +52,8 @@ Mechanics:
 - The transcript is compacted (collapsed tool one-liners, trimmed text) and middle-out truncated to a 300k-char budget — goals live at the start of a session, outcomes at the end, so the middle goes first.
 - The prompt runs in an **ephemeral worker session** via the server API with `tools: {"*": false}` (the worker model cannot call tools) and a purpose-built system prompt; the worker session is deleted afterwards and is never indexed by recall.
 - Results are **cached permanently** in the sidecar DB keyed by `(session_id, model, focus)` and invalidated only if the source session's `time_updated` changes. Repeat calls are instant and free.
-- Sizing: a 16-message session summarizes in ~9 s fresh, focused questions in ~2 s, cache hits in ~0 s.
+- **Batching**: `session_ids` runs up to 4 workers concurrently through a promise pool with per-session error isolation (one bad id yields one error block, not a failed batch), live progress in the tool title (`recall summarize: 3/8`), and in-flight dedupe so concurrent requests for the same session share one worker. Cancelling the tool call aborts in-flight workers (`ctx.abort`), which are still cleaned up.
+- Sizing: a 16-message session summarizes in ~9 s fresh, focused questions in ~2 s, cache hits in ~0 s. A batch's wall time ≈ its slowest session, not the sum: measured 51.7 s for a batch whose sequential sum was 88 s.
 
 The economics vs. eager per-session summaries (the Engram model): summaries are generated lazily, only for sessions someone actually asks about, by a near-free model, and never expire.
 
