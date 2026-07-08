@@ -2,8 +2,10 @@
  * recall — hybrid lexical (FTS5/BM25) + semantic (embedding) search over ALL past
  * OpenCode conversations on this machine.
  *
- * Replaces the past-conversations skill (ad-hoc SQL over the opencode DB) with four
- * agent tools: recall_search, recall_expand, recall_summarize, recall_status.
+ * Replaces the past-conversations skill (ad-hoc SQL over the opencode DB) with five
+ * agent tools forming an escalation ladder: recall_search (corpus → sessions),
+ * recall_inspect (session → locations, or an outline), recall_expand (location →
+ * transcript), recall_summarize (session → digested answer), recall_status.
  *
  * Design notes:
  * - Sidecar index at ~/.local/share/opencode-recall/index.db — the opencode DB is
@@ -44,7 +46,7 @@ const PAIR_ASSISTANT_CHARS = 900
 const TOOL_OUTPUT_CHARS = 16_000
 const RRF_K = 60
 const CANDIDATES = 60
-const OWN_TOOLS = new Set(["recall_search", "recall_expand", "recall_status", "recall_summarize"])
+const OWN_TOOLS = new Set(["recall_search", "recall_expand", "recall_inspect", "recall_status", "recall_summarize"])
 // Summarizer worker: cheap + fast + 1M context, billed to the OpenCode Go plan (NOT Zen).
 const SUMMARY_MODEL = { providerID: "opencode-go", modelID: "glm-5.2" }
 const SUMMARY_CHAR_BUDGET = 300_000
@@ -52,6 +54,12 @@ const SUMMARY_MSG_CHARS = 2_000
 const SUMMARY_TIMEOUT_MS = 180_000
 const SUMMARY_CONCURRENCY = 4
 const SUMMARY_BATCH_MAX = 24
+// Within one session, hybrid-mode semantic search must FILTER, not just rank:
+// cosine always returns top-k even for irrelevant queries, and unlike
+// recall_search there is no cross-session competition to bury weak hits.
+// bge-small scores are compressed: junk ≈ 0.45-0.52, relevant ≈ 0.58-0.75.
+// Explicit mode=semantic skips the filter (pure ranking as an escape hatch).
+const INSPECT_SEM_MIN = 0.55
 const WORKER_PREFIX = "recall-summarizer worker: "
 
 // ---------------------------------------------------------------- utilities
@@ -496,6 +504,10 @@ export const RecallPlugin: Plugin = async (input) => {
     /** Current-session hits BEFORE this time are pre-compaction (out of the
      *  model's context) and therefore allowed; 0 = never compacted = exclude all. */
     excludeBefore: number
+    /** Restrict lexical search to one session AT THE SQL LEVEL — a post-filter
+     *  would miss hits for globally common terms whose top-500 BM25 rows all
+     *  live in other sessions. */
+    sessionFilter?: string
   }
 
   /** Current-session content is excluded only if the model can still see it. */
@@ -730,9 +742,15 @@ export const RecallPlugin: Plugin = async (input) => {
         .query(
           `SELECT session_id, message_id, kind, CAST(time AS INTEGER) time,
                   snippet(fts, 0, '«', '»', '…', 14) snip
-           FROM fts WHERE fts MATCH ? ORDER BY bm25(fts) LIMIT 500`,
+           FROM fts WHERE fts MATCH ?${opts.sessionFilter ? " AND session_id=?" : ""} ORDER BY bm25(fts) LIMIT 500`,
         )
-        .all(match) as { session_id: string; message_id: string; kind: string; time: number; snip: string }[]
+        .all(...(opts.sessionFilter ? [match, opts.sessionFilter] : [match])) as {
+        session_id: string
+        message_id: string
+        kind: string
+        time: number
+        snip: string
+      }[]
       const out: Hit[] = []
       for (const r of rows) {
         if (isExcluded(opts, r.session_id, r.time)) continue
@@ -964,7 +982,7 @@ export const RecallPlugin: Plugin = async (input) => {
             )
           })
           lines.push(
-            `\nUse recall_expand with a session_id (+ optional message_id) to read the surrounding transcript, or recall_summarize for the whole-session story.`,
+            `\nNext rung: recall_inspect(session_id, query?) searches within a session (or outlines it); recall_expand reads around a message_id; recall_summarize (slow, worker model) only if those don't answer it.`,
           )
           return { title: `recall: ${args.query}`, output: lines.join("\n") }
         },
@@ -1031,9 +1049,143 @@ export const RecallPlugin: Plugin = async (input) => {
         },
       }),
 
+      recall_inspect: tool({
+        description:
+          "Look inside ONE past session — the cheap, instant first stop after recall_search finds it, before reaching for recall_summarize. With a query: hybrid-search within that session, returning message-level hits in chronological order with message_ids ready for recall_expand. Without a query: an outline of the session's user turns (its intent skeleton). Purely local — no worker model, no wait.",
+        args: {
+          session_id: tool.schema.string().describe("Session id (ses_...) or slug from recall_search"),
+          query: tool.schema
+            .string()
+            .optional()
+            .describe("Search within the session (omit for a user-turn outline)"),
+          mode: tool.schema
+            .enum(["hybrid", "lexical", "semantic"])
+            .optional()
+            .describe("hybrid (default) fuses both; lexical = exact terms only; semantic = meaning only"),
+          include_tools: tool.schema
+            .boolean()
+            .optional()
+            .describe("Include tool outputs (bash/file contents) in lexical matching (default true)"),
+          limit: tool.schema.number().optional().describe("Max hits in query mode (default 12)"),
+        },
+        async execute(args, ctx) {
+          const candidates = findSession(args.session_id)
+          const s = candidates[0]
+          if (!s) return `No session found for '${args.session_id}'.`
+          const ambiguous =
+            s.id !== args.session_id && candidates.length > 1
+              ? `NOTE: ${candidates.length}+ sessions share slug '${args.session_id}'; inspecting the most recent. Others: ${candidates
+                  .slice(1)
+                  .map((c) => `${c.id} (${c.title.slice(0, 40)}, ${fmtDate(c.time_updated)})`)
+                  .join("; ")}\n`
+              : ""
+          const header =
+            ambiguous +
+            `# ${s.title}\nsession_id=${s.id} slug=${s.slug} · ${shortDir(s.directory)} · ${fmtDate(s.time_created)} → ${fmtDate(s.time_updated)}`
+
+          // ---- outline mode: chronological user-turn TOC
+          if (!args.query?.trim()) {
+            const total = (srcDb.query(`SELECT count(*) c FROM message WHERE session_id=?`).get(s.id) as { c: number })
+              .c
+            const turns = (
+              srcDb
+                .query(
+                  `SELECT m.id, m.time_created t,
+                          (SELECT json_extract(p.data,'$.text') FROM part p
+                           WHERE p.message_id=m.id AND json_extract(p.data,'$.type')='text'
+                           ORDER BY p.time_created, p.id LIMIT 1) txt
+                   FROM message m
+                   WHERE m.session_id=? AND json_extract(m.data,'$.role')='user'
+                   ORDER BY m.time_created, m.id`,
+                )
+                .all(s.id) as { id: string; t: number; txt: string | null }[]
+            ).filter((r) => r.txt && r.txt.trim())
+            const line = (r: { id: string; t: number; txt: string | null }, i: number) =>
+              `${i + 1}. ${fmtDateTime(r.t)} (${r.id}) ${clean(r.txt!, 120)}`
+            let toc: string[]
+            if (turns.length > 60) {
+              toc = [
+                ...turns.slice(0, 30).map(line),
+                `[... ${turns.length - 60} turns omitted — search them with query=... ]`,
+                ...turns.slice(-30).map((r, i) => line(r, turns.length - 30 + i)),
+              ]
+            } else {
+              toc = turns.map(line)
+            }
+            return {
+              title: `recall inspect: ${s.title}`,
+              output: [
+                header,
+                `${total} messages · ${turns.length} user turns`,
+                "",
+                "USER TURNS:",
+                ...toc,
+                "",
+                `Search within: query=...; read around a turn: recall_expand(session_id, message_id); whole-session story: recall_summarize.`,
+              ].join("\n"),
+            }
+          }
+
+          // ---- query mode: scoped hybrid search, message-level hits
+          const opts: SearchOpts = {
+            since: 0,
+            until: Number.MAX_SAFE_INTEGER,
+            includeTools: args.include_tools !== false,
+            whitelist: new Set([s.id]),
+            exclude: ctx.sessionID,
+            excludeBefore: compactionBoundary(ctx.sessionID),
+            sessionFilter: s.id,
+          }
+          const mode = args.mode ?? "hybrid"
+          const lex = mode === "semantic" ? [] : lexicalSearch(args.query, opts)
+          let sem: Hit[] = []
+          if (mode !== "lexical") {
+            try {
+              sem = await semanticSearch(args.query, opts)
+              if (mode === "hybrid")
+                sem = sem.filter((h) => parseFloat(h.via.split(" ")[1] ?? "0") >= INSPECT_SEM_MIN)
+            } catch (e) {
+              log("inspect semantic failed, lexical only", e)
+            }
+          }
+          type Fused = { score: number; hit: Hit; nLex: number; nSem: number }
+          const fused = new Map<string, Fused>()
+          const add = (hits: Hit[], which: "lex" | "sem") => {
+            hits.forEach((h, rank) => {
+              const key = `${h.message_id}|${h.snippet.slice(0, 60)}`
+              const g = fused.get(key) ?? { score: 0, hit: h, nLex: 0, nSem: 0 }
+              g.score += 1 / (RRF_K + rank)
+              which === "lex" ? g.nLex++ : g.nSem++
+              fused.set(key, g)
+            })
+          }
+          add(lex, "lex")
+          add(sem, "sem")
+          if (!fused.size) {
+            const indexed = idxDb.query(`SELECT 1 FROM indexed_sessions WHERE session_id=?`).get(s.id)
+            const hint = indexed
+              ? "Likely not discussed in this session. Try different keywords, mode=semantic (unfiltered ranking), or omit query for a user-turn outline."
+              : "This session is not indexed yet (the index lags a few minutes behind live sessions) — recall_expand reads it directly."
+            return `${header}\n\nNo matches for "${args.query}" (${mode}) in this session. ${hint}`
+          }
+          const limit = Math.max(1, Math.min(args.limit ?? 12, 30))
+          const top = [...fused.values()].sort((a, b) => b.score - a.score).slice(0, limit)
+          top.sort((a, b) => a.hit.time - b.hit.time)
+          const lines = [header, `${top.length} of ${fused.size} matches for "${args.query}" (${mode}) — chronological:`, ""]
+          top.forEach((g, i) => {
+            lines.push(`${i + 1}. ${fmtDateTime(g.hit.time)} (${g.hit.message_id})`, `   [${g.hit.via}] ${g.hit.snippet}`)
+          })
+          lines.push(
+            "",
+            `Read around a hit: recall_expand(session_id, message_id). Escalate to recall_summarize only if this doesn't answer it.`,
+          )
+          return { title: `recall inspect: ${s.title}`, output: lines.join("\n") }
+        },
+      }),
+
       recall_summarize: tool({
         description:
-          "Summarize entire past OpenCode sessions — or answer a focused question about them — without reading the transcripts yourself. Offloads to a cheap, fast, large-context model (GLM-5.2 via OpenCode Go) in ephemeral tool-less worker sessions; results are cached so repeat calls are instant. Batch multiple sessions in one call via session_ids (they run concurrently). Prefer this over paging recall_expand when you need the story of a whole session ('what did we do/decide there?'); use recall_expand for verbatim excerpts.",
+          "ESCALATION rung — summarize entire past OpenCode sessions (or answer a focused question about them) by offloading to a worker model (GLM-5.2 via OpenCode Go). Each fresh summary takes 10-30s, so try the instant local tools first: recall_inspect to search within the session, recall_expand to read around a hit. Reach for this when inspection can't answer cleanly, the session is too large to page, or you genuinely need the whole-session story (results are cached, so repeats are instant). Batch multiple sessions in one call via session_ids — they run concurrently.",
         args: {
           session_id: tool.schema.string().optional().describe("Session id (ses_...) or slug from recall_search"),
           session_ids: tool.schema

@@ -1,8 +1,17 @@
 # recall
 
-Hybrid lexical + semantic search over **all past OpenCode conversations on this machine** — every project, full history. Gives the agent long-term conversational memory as three tools, entirely local.
+Hybrid lexical + semantic search over **all past OpenCode conversations on this machine** — every project, full history. Gives the agent long-term conversational memory, entirely local.
 
 Replaces ad-hoc SQL spelunking in the OpenCode database with a proper index: FTS5/BM25 for exact terms (including tool outputs and reasoning) fused with embedding similarity for fuzzy "we talked about this once" recall.
+
+The tools form an **escalation ladder** — each rung costs more than the last, and the descriptions steer the agent to climb in order:
+
+| Rung | Question | Tool | Cost |
+|---|---|---|---|
+| corpus → sessions | "which thread was that?" | `recall_search` | ~ms, local |
+| session → locations | "where in this session is X?" | `recall_inspect` | ~ms, local |
+| location → transcript | "show me around that point" | `recall_expand` | ~ms, local |
+| session → digested answer | "just tell me the story" | `recall_summarize` | 10–30 s, worker model |
 
 ## Tools
 
@@ -36,9 +45,26 @@ Reads a transcript excerpt around a hit: user/assistant turns with timestamps an
 
 Slugs are not unique across sessions; an exact id always wins, otherwise the newest slug match is shown and alternates are listed.
 
+### `recall_inspect`
+
+Looks inside one session — the cheap middle rung between finding a session and delegating it to the summarizer. With a `query`, it hybrid-searches *within* that session and returns message-level hits in **chronological order** with `message_id`s ready for `recall_expand`. Without a query, it returns an **outline**: the session's user turns (its intent skeleton), so "what happened here?" often needs no model at all.
+
+| Arg | Default | Description |
+|---|---|---|
+| `session_id` | — | `ses_...` id or slug |
+| `query` | — | Search within the session; omit for the user-turn outline |
+| `mode` | `hybrid` | `lexical` / `semantic` as in `recall_search` |
+| `include_tools` | `true` | Include tool outputs in lexical matching |
+| `limit` | 12 | Max hits in query mode |
+
+Two scoped-search subtleties:
+
+- The lexical filter is applied **in the FTS query itself**, not as a post-filter — a globally common term's top-500 BM25 rows might not include this session's rows at all.
+- In hybrid mode, semantic hits below cosine **0.55** are dropped: within a single session there's no cross-session competition to bury weak matches, and cosine always returns top-k even for irrelevant queries (bge-small scores junk at ~0.45–0.52, real matches ~0.58+). Explicit `mode=semantic` skips the filter and gives the raw ranking.
+
 ### `recall_summarize`
 
-Summarizes an entire session — or answers a focused question about it — by offloading to a cheap, fast, large-context model (**GLM-5.2 via OpenCode Go**, provider `opencode-go`; deliberately not OpenCode Zen) instead of spending the main model's context on transcript reading.
+The **escalation rung**: summarizes an entire session — or answers a focused question about it — by offloading to a cheap, fast, large-context model (**GLM-5.2 via OpenCode Go**, provider `opencode-go`; deliberately not OpenCode Zen) instead of spending the main model's context on transcript reading. Reach for it when `recall_inspect`/`recall_expand` can't answer cleanly, the session is too large to page, or the whole-session story is genuinely what's needed.
 
 | Arg | Default | Description |
 |---|---|---|
