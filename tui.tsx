@@ -24,12 +24,38 @@ const tui: TuiPlugin = async (api, options) => {
   const heartbeat = setInterval(() => setTick((t) => t + 1), 1000)
   api.lifecycle.onDispose(() => clearInterval(heartbeat))
 
+  // Busy-start times keyed by session, tracked at the plugin level from the
+  // event bus rather than inside the slot component. The TUI unmounts the
+  // prompt row (and this slot with it) whenever a permission or question
+  // prompt appears — including ones raised by subagent child sessions — so
+  // any state held in the slot's memos is wiped on every such blip. "retry"
+  // counts as still-running: provider retries shouldn't reset the timer.
+  const [starts, setStarts] = createSignal<Record<string, number>>({})
+  const offStatus = api.event.on("session.status", (event) => {
+    const { sessionID, status } = event.properties
+    setStarts((prev) => {
+      if (status.type === "idle") {
+        if (!(sessionID in prev)) return prev
+        const next = { ...prev }
+        delete next[sessionID]
+        return next
+      }
+      if (sessionID in prev) return prev
+      return { ...prev, [sessionID]: Date.now() }
+    })
+  })
+  api.lifecycle.onDispose(offStatus)
+
   api.slots.register({
     slots: {
       session_prompt_right(ctx, props) {
         const busyStart = createMemo<number | undefined>((prev) => {
+          const tracked = starts()[props.session_id]
+          if (tracked !== undefined) return tracked
+          // Fallback for a session already running when the TUI attached,
+          // before its first status event arrives.
           const s = api.state.session.status(props.session_id)
-          if (s?.type === "busy") return prev ?? Date.now()
+          if (s && s.type !== "idle") return prev ?? Date.now()
           return undefined
         }, undefined)
 
