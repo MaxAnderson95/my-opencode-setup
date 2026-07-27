@@ -1,13 +1,15 @@
 import type { Plugin } from "@opencode-ai/plugin"
 
-const secret = process.env.BRRR_WEBHOOK_SECRET
-const endpoint = `https://api.brrr.now/v1/${secret}`
+const endpoint = process.env.HARK_WEBHOOK_URL
 const idleDelay = 1000
 const minBusyMs = 300_000
 const home = process.env.HOME
+// Hark rejects a body over 2,000 chars or a title over 80 with a 400.
+const maxBody = 2000
+const maxTitle = 80
 
 export default (async ({ client, directory }) => {
-  if (!secret) return {}
+  if (!endpoint) return {}
 
   const project = directory === home ? "~/" : directory.split("/").filter(Boolean).at(-1) ?? "opencode"
   const busySince = new Map<string, number>()
@@ -41,7 +43,7 @@ export default (async ({ client, directory }) => {
     return "current session"
   }
 
-  const lastAssistantText = async (sessionID: string, maxLen = 250) => {
+  const lastAssistantText = async (sessionID: string, maxLen = maxBody) => {
     const result = await client.session
       .messages({ path: { id: sessionID } })
       .catch(() => undefined)
@@ -66,17 +68,21 @@ export default (async ({ client, directory }) => {
     return (boundary > maxLen * 0.6 ? truncated.slice(0, boundary) : truncated) + "…"
   }
 
-  const send = async (title: string, message: string) => {
+  const clamp = (text: string, max: number) => {
+    const trimmed = text.trim()
+    return trimmed.length <= max ? trimmed : trimmed.slice(0, max - 1) + "…"
+  }
+
+  // Hark has no subtitle field, so the project rides along in the sender title.
+  const send = async (title: string, body: string) => {
     await fetch(endpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        title,
-        subtitle: project,
-        message,
-        "interruption-level": "active",
+        title: clamp(`${title} · ${project}`, maxTitle),
+        body: clamp(body, maxBody),
       }),
     }).catch(() => undefined)
   }
@@ -109,7 +115,7 @@ export default (async ({ client, directory }) => {
 
       if (event.type === "permission.asked") {
         if (!longEnough(event.properties.sessionID)) return
-        await notify(event.properties.sessionID, "OpenCode needs permission", (name) => `Waiting for approval in ${name}.`)
+        await notify(event.properties.sessionID, "Needs permission", (name) => `Waiting for approval in ${name}.`)
         return
       }
 
@@ -128,10 +134,10 @@ export default (async ({ client, directory }) => {
         errors.delete(sid)
         if (!wasLongEnough) return
         if (errMsg) {
-          void notify(sid, "OpenCode errored", (name) => `${name} failed: ${errMsg}`)
+          void notify(sid, "Errored", (name) => `${name} failed: ${errMsg}`)
         } else {
           const snippet = await lastAssistantText(sid)
-          void notify(sid, "OpenCode finished", (name) => snippet ?? `${name} is done.`)
+          void notify(sid, "Finished", (name) => snippet ?? `${name} is done.`)
         }
       }, idleDelay)
 
@@ -140,7 +146,7 @@ export default (async ({ client, directory }) => {
     "tool.execute.before": async (input) => {
       if (input.tool !== "question") return
       if (!longEnough(input.sessionID)) return
-      await notify(input.sessionID, "OpenCode has a question", (name) => `Waiting for your answer in ${name}.`)
+      await notify(input.sessionID, "Has a question", (name) => `Waiting for your answer in ${name}.`)
     },
   }
 }) satisfies Plugin
