@@ -13,16 +13,31 @@
  * "the model" alone is ambiguous. `list_subagent_models` lets the caller discover
  * valid pairs and compare per-provider pricing before choosing.
  *
+ * Reasoning effort is exposed through the optional `variant` argument. opencode
+ * models a provider's reasoning levels as named "variants" — a catalog-declared
+ * bag of option overrides per level (e.g. anthropic/claude-opus-5 →
+ * low|medium|high|xhigh|max, each mapping to `{ thinking, effort }`; the OpenAI
+ * family → minimal|low|medium|high|xhigh mapping to reasoningEffort). The prompt
+ * endpoint accepts a per-call `variant`, applied as
+ * `mergeOptions(base, model.options, agent.options, model.variants[variant])`.
+ *
+ * An UNKNOWN variant is silently ignored by the server (the lookup misses and the
+ * run proceeds at the model's default effort, verified empirically), which would
+ * quietly hand back a cheaper/weaker run than asked for. So the variant is
+ * validated against the model's own `variants` map here and rejected loudly.
+ * That validation also makes this arg self-guarding on older servers whose
+ * catalog has no variants at all: nothing is ever sent that they'd reject.
+ *
  * Implementation (strictly a v1 plugin, SDK-driven — no core changes):
- *   1. Validate providerID/modelID against client.config.providers() and the
- *      agent name against client.app.agents().
+ *   1. Validate providerID/modelID (and the variant, if given) against
+ *      client.config.providers(), and the agent name against client.app.agents().
  *   2. Create a child session (parentID = current session).
  *   3. client.session.prompt(childID, { agent, model: { providerID, modelID },
- *      parts }) — the prompt endpoint honors a per-call model override.
+ *      variant, parts }) — the prompt endpoint honors both per-call overrides.
  *   4. Return the subagent's final assistant text.
  *
  * Verified against the opencode SDK: session.create body { parentID, title };
- * session.prompt body { agent, model: { providerID, modelID }, parts };
+ * session.prompt body { agent, model: { providerID, modelID }, variant, parts };
  * session.abort; /config/providers; /agent. Model cost is USD per 1,000,000
  * tokens (see Session.getUsage: tokens * cost / 1_000_000).
  */
@@ -35,12 +50,17 @@ type CatalogModel = {
   cost?: { input?: number; output?: number; cache?: { read?: number; write?: number } }
   limit?: { context?: number; output?: number }
   status?: string
+  capabilities?: { reasoning?: boolean }
+  /** Named reasoning-effort levels; each value is a bag of option overrides. */
+  variants?: Record<string, Record<string, unknown>>
 }
 type CatalogProvider = { id: string; name?: string; models: Record<string, CatalogModel> }
 type AgentInfo = { name: string; mode: "subagent" | "primary" | "all"; description?: string }
 
 const DEFAULT_AGENT = "general"
 const MAX_LIST_ROWS = 200
+/** Sentinel the core itself uses for "no variant override" (see SessionPrompt.currentModel). */
+const DEFAULT_VARIANT = "default"
 
 function fmtErr(error: unknown): string {
   if (!error) return "unknown error"
@@ -48,7 +68,10 @@ function fmtErr(error: unknown): string {
   if (error instanceof Error) return error.message
   try {
     const data = (error as { data?: unknown }).data ?? error
-    return typeof data === "string" ? data : JSON.stringify(data)
+    if (typeof data === "string") return data
+    const message = (data as { message?: unknown }).message
+    if (typeof message === "string" && message) return message
+    return JSON.stringify(data)
   } catch {
     return String(error)
   }
@@ -73,10 +96,23 @@ function fmtCost(m: CatalogModel): string {
   return `$${fmtNum(c.input)}/1M in, $${fmtNum(c.output)}/1M out`
 }
 
+/**
+ * Catalog insertion order is preserved on purpose: providers declare variants in
+ * ascending effort (low → max), which is more useful than alphabetising them.
+ */
+function variantNames(m: CatalogModel): string[] {
+  return Object.keys(m.variants ?? {})
+}
+
+function fmtVariants(m: CatalogModel): string {
+  const names = variantNames(m)
+  return names.length ? ` — variants: ${names.join(", ")}` : ""
+}
+
 function modelLine(providerID: string, m: CatalogModel): string {
   const name = m.name && m.name !== m.id ? ` (${m.name})` : ""
   const status = m.status && m.status !== "active" ? ` [${m.status}]` : ""
-  return `${providerID}/${m.id}${name} — ${fmtCost(m)} — ctx ${fmtContext(m.limit?.context)}${status}`
+  return `${providerID}/${m.id}${name} — ${fmtCost(m)} — ctx ${fmtContext(m.limit?.context)}${fmtVariants(m)}${status}`
 }
 
 export const SubagentModelPlugin: Plugin = async ({ client, directory }) => {
@@ -138,6 +174,23 @@ export const SubagentModelPlugin: Plugin = async ({ client, directory }) => {
     return lines.join("\n")
   }
 
+  function variantNotFound(providerID: string, model: CatalogModel, variant: string): string {
+    const names = variantNames(model)
+    const pair = `${providerID}/${model.id}`
+    if (!names.length) {
+      return (
+        `Model "${pair}" exposes no reasoning variants, so its reasoning effort cannot be set` +
+        `${model.capabilities?.reasoning === false ? " (it is not a reasoning model)" : ""}. ` +
+        `Omit the variant argument, or pick a model whose list_subagent_models entry shows "variants:".`
+      )
+    }
+    return (
+      `Model "${pair}" has no variant "${variant}". ` +
+      `Available variants (provider-specific reasoning efforts, usually ascending): ${names.join(", ")}. ` +
+      `Omit variant (or pass "${DEFAULT_VARIANT}") to run at the model's default reasoning effort.`
+    )
+  }
+
   function agentNotFound(agentName: string, agents: AgentInfo[]): string {
     const usable = agents.filter((a) => a.mode !== "primary").map((a) => a.name)
     return (
@@ -155,8 +208,9 @@ export const SubagentModelPlugin: Plugin = async ({ client, directory }) => {
           "this lets you choose the exact provider+model to run the subagent on. " +
           "You MUST pass both providerID and modelID: the same model is often offered by multiple " +
           "providers at different prices, so the model name alone is ambiguous. " +
-          "If you are unsure which provider/model pairs exist or how they are priced, call " +
-          "list_subagent_models first. Runs synchronously and returns the subagent's final answer.",
+          "Optionally set `variant` to control the subagent's reasoning effort (e.g. 'low', 'high', 'max'). " +
+          "If you are unsure which provider/model pairs exist, how they are priced, or which variants they " +
+          "support, call list_subagent_models first. Runs synchronously and returns the subagent's final answer.",
         args: {
           description: tool.schema.string().describe("A short (3-5 word) description of the task"),
           prompt: tool.schema.string().describe("The full task/prompt for the subagent to perform"),
@@ -170,11 +224,21 @@ export const SubagentModelPlugin: Plugin = async ({ client, directory }) => {
             .string()
             .optional()
             .describe(`Which subagent type to use (its persona/permissions). Defaults to "${DEFAULT_AGENT}".`),
+          variant: tool.schema
+            .string()
+            .optional()
+            .describe(
+              "Reasoning effort for the subagent, as a model variant name. Provider-specific, commonly " +
+                "'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'none', or 'thinking'. Must be one of the " +
+                "variants listed for that provider/model by list_subagent_models; an unsupported value is " +
+                `rejected. Omit (or pass "${DEFAULT_VARIANT}") to use the model's default reasoning effort.`,
+            ),
         },
         async execute(args, ctx) {
           const providerID = args.providerID.trim()
           const modelID = args.modelID.trim()
           const agentName = (args.agent ?? DEFAULT_AGENT).trim()
+          const requestedVariant = args.variant?.trim()
 
           const providers = await getProviders()
           const provider = providers.find((p) => p.id === providerID)
@@ -182,11 +246,19 @@ export const SubagentModelPlugin: Plugin = async ({ client, directory }) => {
           const model = provider.models[modelID]
           if (!model) return modelNotFound(providerID, modelID, provider, providers)
 
+          // Resolve to the catalog's own casing so a "HIGH" still hits variants["high"].
+          let variant: string | undefined
+          if (requestedVariant && requestedVariant.toLowerCase() !== DEFAULT_VARIANT) {
+            variant = variantNames(model).find((v) => v.toLowerCase() === requestedVariant.toLowerCase())
+            if (!variant) return variantNotFound(providerID, model, requestedVariant)
+          }
+
           const agents = await getAgents()
           if (agents.length && !agents.some((a) => a.name === agentName)) return agentNotFound(agentName, agents)
 
+          const label = `${providerID}/${modelID}${variant ? `:${variant}` : ""}`
           const created = await client.session.create({
-            body: { parentID: ctx.sessionID, title: `${args.description} (@${agentName} · ${providerID}/${modelID})` },
+            body: { parentID: ctx.sessionID, title: `${args.description} (@${agentName} · ${label})` },
             query,
           })
           if (created.error || !created.data) return `Failed to create subagent session: ${fmtErr(created.error)}`
@@ -199,14 +271,20 @@ export const SubagentModelPlugin: Plugin = async ({ client, directory }) => {
           ctx.abort.addEventListener("abort", onAbort)
 
           try {
+            type PromptBody = NonNullable<Parameters<typeof client.session.prompt>[0]["body"]>
+            // The generated SDK types (through 1.18.5) omit `variant` from the prompt
+            // body even though the server's own schema accepts it (see the server's
+            // GET /doc, POST /session/{sessionID}/message), hence the cast.
+            const body: PromptBody & { variant?: string } = {
+              agent: agentName,
+              model: { providerID, modelID },
+              ...(variant ? { variant } : {}),
+              parts: [{ type: "text", text: args.prompt }],
+            }
             const res = await client.session.prompt({
               path: { id: childID },
               query,
-              body: {
-                agent: agentName,
-                model: { providerID, modelID },
-                parts: [{ type: "text", text: args.prompt }],
-              },
+              body: body as PromptBody,
             })
             if (res.error || !res.data) return `Subagent run failed: ${fmtErr(res.error)}`
 
@@ -220,11 +298,16 @@ export const SubagentModelPlugin: Plugin = async ({ client, directory }) => {
               )
             const text = lastText?.text ?? ""
 
-            const header = `[subagent @${agentName} on ${providerID}/${modelID} — session ${childID}]`
+            const header = `[subagent @${agentName} on ${label} — session ${childID}]`
+            // A failed run (bad credentials, provider rejection, aborted) comes back
+            // 200 with no text and the reason parked on the message, so surface it
+            // instead of an unhelpful "(no text output)".
+            const runError = res.data.info?.error
+            const fallback = runError ? `run failed: ${fmtErr(runError)}` : "(no text output)"
             return {
-              title: `@${agentName} · ${providerID}/${modelID}`,
-              output: text ? `${header}\n\n${text}` : `${header}\n\n(no text output)`,
-              metadata: { childSessionID: childID, providerID, modelID, agent: agentName },
+              title: `@${agentName} · ${label}`,
+              output: `${header}\n\n${text || fallback}`,
+              metadata: { childSessionID: childID, providerID, modelID, variant, agent: agentName },
             }
           } finally {
             ctx.abort.removeEventListener("abort", onAbort)
@@ -235,7 +318,8 @@ export const SubagentModelPlugin: Plugin = async ({ client, directory }) => {
       list_subagent_models: tool({
         description:
           "List provider/model pairs available to task_with_model, with per-provider pricing (USD per 1M " +
-          "tokens) and context window. Use this to discover valid providerID/modelID values and to compare how " +
+          "tokens), context window, and the reasoning-effort variants each pair accepts for task_with_model's " +
+          "`variant` argument. Use this to discover valid providerID/modelID values and to compare how " +
           "the SAME model is priced across different providers before spawning a subagent. Optionally filter by a " +
           "substring matched against provider id, model id, or model name.",
         args: {
