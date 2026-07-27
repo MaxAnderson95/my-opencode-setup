@@ -28,6 +28,10 @@ Allowlisted (never blocked): `.env.example` and `*.pub`. Broad substring globs l
 
 So the agent isn't flying blind, the plugin adds a **`list_env_keys`** tool that returns the **keys** of an env-style file (e.g. `.env`) — **never the values**. This lets the agent see an app's expected configuration shape without exposing secrets.
 
+## `set_env_value` tool
+
+The **`set_env_value`** tool creates or updates one assignment in a protected `.env` or `.env.*` file without returning its value or any existing file contents. It preserves unrelated lines, updates every existing assignment for the requested key, rejects multiline values, and creates new files with owner-only permissions.
+
 ## Configuration
 
 Two options (via `PluginOptions`):

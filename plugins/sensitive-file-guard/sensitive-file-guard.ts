@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import type { Plugin, PluginOptions } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
@@ -780,6 +780,25 @@ function parseEnvKeys(contents: string): { keys: string[]; blankOrComment: numbe
   return { keys: [...new Set(keys)].sort(), blankOrComment, malformed }
 }
 
+function setEnvValue(contents: string, key: string, value: string): { contents: string; updated: boolean } {
+  const newline = contents.includes("\r\n") ? "\r\n" : "\n"
+  const hadFinalNewline = contents.endsWith("\n")
+  const lines = contents ? contents.split(/\r?\n/) : []
+  if (hadFinalNewline) lines.pop()
+
+  const assignment = new RegExp(`^(\\s*)(?:export\\s+)?${escapeRegExp(key)}\\s*=.*$`)
+  let updated = false
+  for (let index = 0; index < lines.length; index++) {
+    const match = assignment.exec(lines[index])
+    if (!match) continue
+    lines[index] = `${match[1]}${key}=${value}`
+    updated = true
+  }
+
+  if (!updated) lines.push(`${key}=${value}`)
+  return { contents: lines.join(newline) + newline, updated }
+}
+
 export const SensitiveFileGuard: Plugin = async (ctx, options?: GuardOptions) => {
   const protectedPatterns = options?.protected ?? DEFAULT_PROTECTED
   const blockCopy = options?.blockCopy ?? true
@@ -807,6 +826,36 @@ export const SensitiveFileGuard: Plugin = async (ctx, options?: GuardOptions) =>
             "Values were not included. This was an OpenCode tool call, not a shell command. To run a command with these values available, use: set -a; source .env; set +a; <command>",
           ]
           return lines.join("\n")
+        },
+      }),
+      set_env_value: tool({
+        description:
+          "Create or update one key-value assignment in a protected .env file without exposing its existing contents. The value must already be valid single-line .env syntax. Returns only whether the key was created or updated, never its value.",
+        args: {
+          path: tool.schema.string().describe("Path to a protected dotenv file such as .env or .env.local"),
+          key: tool.schema.string().describe("Environment variable name"),
+          value: tool.schema.string().describe("Single-line value to write after the equals sign"),
+        },
+        async execute(args, context) {
+          if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(args.key)) {
+            throw new Error("Invalid environment variable name")
+          }
+          if (/[\r\n\0]/.test(args.value)) {
+            throw new Error("Env values must not contain newlines or null bytes")
+          }
+
+          const abs = path.resolve(path.isAbsolute(args.path) ? args.path : path.join(context.directory, args.path))
+          if (!isHardBlockedEnvFile(abs)) {
+            throw new Error("set_env_value only writes protected .env or .env.* files")
+          }
+
+          const existed = existsSync(abs)
+          const current = existed ? readFileSync(abs, "utf8") : ""
+          const result = setEnvValue(current, args.key, args.value)
+          writeFileSync(abs, result.contents, { encoding: "utf8", mode: 0o600 })
+
+          const action = existed && result.updated ? "Updated" : "Created"
+          return `${action} ${args.key} in ${normalizeForDisplay(abs, context.directory)}. The value and existing file contents were not returned.`
         },
       }),
     },
