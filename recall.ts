@@ -1,27 +1,17 @@
 /**
- * recall — hybrid lexical (FTS5/BM25) + semantic (embedding) search over ALL past
- * OpenCode conversations on this machine.
+ * recall — hybrid lexical (FTS5/BM25) + semantic (embedding) search over ALL
+ * past OpenCode conversations on this machine.
  *
- * Replaces the past-conversations skill (ad-hoc SQL over the opencode DB) with five
- * agent tools forming an escalation ladder: recall_search (corpus → sessions),
- * recall_inspect (session → locations, or an outline), recall_expand (location →
- * transcript), recall_summarize (session → digested answer), recall_status.
+ * Five agent tools forming an escalation ladder, cheapest rung first:
+ *   recall_search    corpus  -> sessions
+ *   recall_inspect   session -> locations, or an outline
+ *   recall_expand    location -> transcript
+ *   recall_summarize session -> digested answer (worker model)
+ *   recall_status    index health
  *
- * Design notes:
- * - Sidecar index at ~/.local/share/opencode-recall/index.db — the opencode DB is
- *   only ever opened read-only.
- * - Embeddings: in-process transformers.js (Xenova/bge-small-en-v1.5, q8, 384-dim),
- *   loaded via dynamic import so a missing/not-yet-installed dependency can never
- *   poison plugin module load (Bun caches failed static import resolution).
- * - Chunking: turn-pairs (user msg + following assistant text) are embedded;
- *   ALL text (incl. tool outputs, reasoning) goes into FTS for exact-term recall.
- * - Indexing: session.idle events + a watermark-based catch-up backfill on startup.
- *   Idempotent per-session rebuild; embeddings reused via content hash.
- * - The embedder (~300MB RSS) is lazy-loaded and disposed after 10 min idle.
- * - recall_summarize offloads whole-session summarization to a cheap fast
- *   large-context model (GLM-5.2 via OpenCode Go — NOT Zen) in an ephemeral,
- *   tool-less worker session that is deleted afterwards; results are cached in
- *   the sidecar keyed by (session, watermark, model, focus).
+ * Architecture lives in lib/: config, text (pure helpers), source (opencode's
+ * DB), schema (sidecar DDL + migration), embedder, indexer, search, summarize.
+ * This file is wiring and tool surface only.
  */
 import fs from "node:fs"
 import path from "node:path"
@@ -29,91 +19,35 @@ import os from "node:os"
 import { Database } from "bun:sqlite"
 import { tool, type Plugin } from "@opencode-ai/plugin"
 
-// ---------------------------------------------------------------- constants
+import { loadConfig, modelTag } from "./lib/config.ts"
+import { createEmbedder } from "./lib/embedder.ts"
+import { Indexer } from "./lib/indexer.ts"
+import { createNotifier, noopNotify } from "./lib/notify.ts"
+import { BackfillLease, migrate, openIndex } from "./lib/schema.ts"
+import { SearchIndex, fuse, type Filters, type Hit } from "./lib/search.ts"
+import { Source, type SessionRow } from "./lib/source.ts"
+import { Summarizer, WORKER_PREFIX, pool } from "./lib/summarize.ts"
+import { clean, fmtDate, fmtDateTime, shortDir } from "./lib/text.ts"
 
-const MODEL = "Xenova/bge-small-en-v1.5"
-const DIMS = 384
-// bge models want this prefix on retrieval *queries* (not documents)
-const QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
-const DATA_DIR = path.join(os.homedir(), ".local", "share", "opencode-recall")
-const SOURCE_DB = path.join(os.homedir(), ".local", "share", "opencode", "opencode.db")
-const LOG_FILE = path.join(DATA_DIR, "recall.log")
-const EMBED_BATCH = 8
-const EMBEDDER_IDLE_MS = 10 * 60 * 1000
-const BACKFILL_DELAY_MS = 20_000
-const PAIR_USER_CHARS = 900
-const PAIR_ASSISTANT_CHARS = 900
-const TOOL_OUTPUT_CHARS = 16_000
-const RRF_K = 60
-const CANDIDATES = 60
-const OWN_TOOLS = new Set(["recall_search", "recall_expand", "recall_inspect", "recall_status", "recall_summarize"])
-// Summarizer worker: cheap + fast + 1M context, billed to the OpenCode Go plan (NOT Zen).
-const SUMMARY_MODEL = { providerID: "opencode-go", modelID: "glm-5.2" }
-const SUMMARY_CHAR_BUDGET = 300_000
-const SUMMARY_MSG_CHARS = 2_000
-const SUMMARY_TIMEOUT_MS = 180_000
-const SUMMARY_CONCURRENCY = 4
-const SUMMARY_BATCH_MAX = 24
-// Within one session, hybrid-mode semantic search must FILTER, not just rank:
-// cosine always returns top-k even for irrelevant queries, and unlike
-// recall_search there is no cross-session competition to bury weak hits.
-// bge-small scores are compressed: junk ≈ 0.45-0.52, relevant ≈ 0.58-0.75.
-// Explicit mode=semantic skips the filter (pure ranking as an escape hatch).
-const INSPECT_SEM_MIN = 0.55
-const WORKER_PREFIX = "recall-summarizer worker: "
+const OWN_TOOLS = new Set([
+  "recall_search",
+  "recall_expand",
+  "recall_inspect",
+  "recall_status",
+  "recall_summarize",
+])
 
-// ---------------------------------------------------------------- utilities
-
-function log(...args: unknown[]) {
-  try {
-    const line = `${new Date().toISOString()} ${args.map((a) => (a instanceof Error ? (a.stack ?? String(a)) : typeof a === "string" ? a : JSON.stringify(a))).join(" ")}\n`
-    if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size > 5 * 1024 * 1024) fs.truncateSync(LOG_FILE, 0)
-    fs.appendFileSync(LOG_FILE, line)
-  } catch {}
-}
-
-// eslint-disable-next-line no-control-regex
-const ANSI_RE = /[\u001b\u009b](?:\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\[[0-9;?]*[0-9A-ORZcf-nqry=><]|[()#][0-9A-Za-z])/g
-
-function clean(text: string, max: number): string {
-  const out = text.replace(ANSI_RE, "").replace(/\s+/g, " ").trim()
-  return out.length > max ? out.slice(0, max) + "…" : out
-}
-
-function shortDir(dir: string): string {
-  const home = os.homedir()
-  return dir.startsWith(home) ? "~" + dir.slice(home.length) : dir
-}
-
-function fmtDate(ms: number): string {
-  const d = new Date(ms)
-  const p = (n: number) => String(n).padStart(2, "0")
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
-}
-
-function fmtDateTime(ms: number): string {
-  const d = new Date(ms)
-  const p = (n: number) => String(n).padStart(2, "0")
-  return `${fmtDate(ms)} ${p(d.getHours())}:${p(d.getMinutes())}`
-}
-
-function toVec(blob: Uint8Array): Float32Array {
-  if (blob.byteOffset % 4 === 0 && blob.byteLength === DIMS * 4)
-    return new Float32Array(blob.buffer, blob.byteOffset, DIMS)
-  return new Float32Array(blob.slice().buffer, 0, DIMS)
-}
-
-function dot(a: Float32Array, b: Float32Array): number {
-  let s = 0
-  for (let i = 0; i < DIMS; i++) s += a[i] * b[i]
-  return s
-}
-
-/** FTS5 MATCH syntax treats many chars as operators; quote every token. */
-function ftsQuery(query: string, op: "AND" | "OR"): string | undefined {
-  const tokens = query.match(/[\p{L}\p{N}_./@-]+/gu)
-  if (!tokens?.length) return undefined
-  return tokens.map((t) => `"${t.replaceAll('"', "")}"`).join(` ${op} `)
+function makeLogger(dataDir: string) {
+  const file = path.join(dataDir, "recall.log")
+  return (...args: unknown[]) => {
+    try {
+      const body = args
+        .map((a) => (a instanceof Error ? (a.stack ?? String(a)) : typeof a === "string" ? a : JSON.stringify(a)))
+        .join(" ")
+      if (fs.existsSync(file) && fs.statSync(file).size > 5 * 1024 * 1024) fs.truncateSync(file, 0)
+      fs.appendFileSync(file, `${new Date().toISOString()} ${body}\n`)
+    } catch {}
+  }
 }
 
 function parseWhen(s: string | undefined, fallback: number): number {
@@ -122,762 +56,182 @@ function parseWhen(s: string | undefined, fallback: number): number {
   return Number.isNaN(ms) ? fallback : ms
 }
 
-// ---------------------------------------------------------------- embedder
-
-type Embedder = {
-  embed(texts: string[]): Promise<Float32Array[]>
-  dispose(): Promise<void>
+function clampInt(v: number | undefined, lo: number, hi: number, dflt: number): number {
+  if (typeof v !== "number" || !Number.isFinite(v)) return dflt
+  return Math.max(lo, Math.min(Math.round(v), hi))
 }
 
-let embedderP: Promise<Embedder> | null = null
-let embedderLastUse = 0
-
-function getEmbedder(): Promise<Embedder> {
-  embedderLastUse = Date.now()
-  if (embedderP) return embedderP
-  const p = (async (): Promise<Embedder> => {
-    // Dynamic import: keeps plugin module load independent of the heavy dep.
-    const { pipeline, env } = await import("@huggingface/transformers")
-    env.cacheDir = path.join(DATA_DIR, "models")
-    const t0 = performance.now()
-    const pipe = await pipeline("feature-extraction", MODEL, { dtype: "q8" })
-    log(`embedder loaded in ${Math.round(performance.now() - t0)}ms`)
-    return {
-      async embed(texts: string[]): Promise<Float32Array[]> {
-        embedderLastUse = Date.now()
-        const out: Float32Array[] = []
-        for (let i = 0; i < texts.length; i += EMBED_BATCH) {
-          const batch = texts.slice(i, i + EMBED_BATCH)
-          const tensor = await pipe(batch, { pooling: "mean", normalize: true })
-          const data = tensor.data as Float32Array
-          for (let j = 0; j < batch.length; j++) out.push(data.slice(j * DIMS, (j + 1) * DIMS))
-          tensor.dispose?.()
-          embedderLastUse = Date.now()
-        }
-        return out
-      },
-      async dispose() {
-        await pipe.dispose?.()
-      },
-    }
-  })()
-  embedderP = p
-  p.catch((e) => {
-    log("embedder load failed", e)
-    if (embedderP === p) embedderP = null // allow retry on next use
-  })
-  return p
+function fileSize(p: string): number {
+  try {
+    return fs.statSync(p).size
+  } catch {
+    return 0
+  }
 }
 
-const embedderReaper = setInterval(() => {
-  if (!embedderP || Date.now() - embedderLastUse < EMBEDDER_IDLE_MS) return
-  const p = embedderP
-  embedderP = null
-  p.then((e) => e.dispose()).catch(() => {})
-  log("embedder disposed after idle")
-}, 60_000)
-embedderReaper.unref?.()
-
-// ---------------------------------------------------------------- plugin
+/**
+ * When init fails the plugin must not take opencode down with it, but going
+ * completely silent leaves no way to find out why from inside the session.
+ * A lone status tool that reports the failure is the compromise.
+ */
+function disabledPlugin(reason: string, logPath: string) {
+  return {
+    tool: {
+      recall_status: tool({
+        description:
+          "Show the recall conversation-index status. recall is currently DISABLED because it failed to initialise; this reports why.",
+        args: {},
+        async execute() {
+          return {
+            title: "recall status: disabled",
+            output: `recall is disabled: ${reason}\n\nThe other recall_* tools are unavailable this session. Diagnostics: ${logPath}`,
+          }
+        },
+      }),
+    },
+  }
+}
 
 export const RecallPlugin: Plugin = async (input) => {
-  // Server API client — used only by recall_summarize's ephemeral worker.
   const client = (input as { client?: any } | undefined)?.client
-  // Never let init failures break opencode; disable ourselves instead.
+  const home = os.homedir()
+  const { config, source: configSource, warnings } = loadConfig()
+  const indexPath = path.join(config.dataDir, "index.db")
+  const logPath = path.join(config.dataDir, "recall.log")
+
+  let log: (...args: unknown[]) => void = () => {}
   let srcDb: Database
   let idxDb: Database
+  let migration: { reset: boolean; reason: string; reclaimedBytes: number }
   try {
-    if (!fs.existsSync(SOURCE_DB)) throw new Error(`source db not found: ${SOURCE_DB}`)
-    fs.mkdirSync(DATA_DIR, { recursive: true })
-    srcDb = new Database(SOURCE_DB, { readonly: true })
-    idxDb = new Database(path.join(DATA_DIR, "index.db"), { create: true })
-    idxDb.run("PRAGMA journal_mode=WAL")
-    idxDb.run("PRAGMA busy_timeout=5000")
-    idxDb.run("PRAGMA synchronous=NORMAL")
-    idxDb.run(`CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)`)
-    idxDb.run(`CREATE TABLE IF NOT EXISTS chunks(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id TEXT NOT NULL,
-      message_id TEXT NOT NULL,
-      time INTEGER NOT NULL,
-      hash TEXT NOT NULL,
-      text TEXT NOT NULL,
-      emb BLOB NOT NULL)`)
-    idxDb.run(`CREATE INDEX IF NOT EXISTS chunks_session ON chunks(session_id)`)
-    idxDb.run(`CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
-      text, session_id UNINDEXED, message_id UNINDEXED, role UNINDEXED, kind UNINDEXED, time UNINDEXED)`)
-    idxDb.run(`CREATE TABLE IF NOT EXISTS parts_indexed(
-      fts_rowid INTEGER PRIMARY KEY,
-      session_id TEXT NOT NULL)`)
-    idxDb.run(`CREATE INDEX IF NOT EXISTS parts_indexed_session ON parts_indexed(session_id)`)
-    idxDb.run(`CREATE TABLE IF NOT EXISTS indexed_sessions(
-      session_id TEXT PRIMARY KEY,
-      time_updated INTEGER NOT NULL,
-      chunks INTEGER NOT NULL DEFAULT 0,
-      fts_rows INTEGER NOT NULL DEFAULT 0)`)
-    idxDb.run(`CREATE TABLE IF NOT EXISTS sessions(
-      id TEXT PRIMARY KEY, slug TEXT, title TEXT, directory TEXT,
-      parent_id TEXT, time_created INTEGER, time_updated INTEGER)`)
-    // Summary cache — deliberately NOT cleared on embedding-model change.
-    idxDb.run(`CREATE TABLE IF NOT EXISTS summaries(
-      session_id TEXT NOT NULL,
-      model TEXT NOT NULL,
-      focus TEXT NOT NULL DEFAULT '',
-      time_updated INTEGER NOT NULL,
-      summary TEXT NOT NULL,
-      created INTEGER NOT NULL,
-      PRIMARY KEY (session_id, model, focus))`)
-
-    // model change -> full semantic + lexical reindex
-    const meta = idxDb.query(`SELECT value FROM meta WHERE key='model'`).get() as { value: string } | null
-    const modelTag = `${MODEL}:${DIMS}`
-    if (meta && meta.value !== modelTag) {
-      log(`model changed ${meta.value} -> ${modelTag}; resetting index`)
-      idxDb.run(`DELETE FROM chunks`)
-      idxDb.run(`DELETE FROM fts`)
-      idxDb.run(`DELETE FROM parts_indexed`)
-      idxDb.run(`DELETE FROM indexed_sessions`)
-    }
-    idxDb.run(`INSERT INTO meta(key,value) VALUES ('model',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, [
-      modelTag,
-    ])
+    fs.mkdirSync(config.dataDir, { recursive: true })
+    log = makeLogger(config.dataDir)
+    for (const w of warnings) log("config warning:", w)
+    if (configSource !== "defaults") log(`config loaded from ${configSource}`)
+    if (!fs.existsSync(config.sourceDb)) throw new Error(`source db not found: ${config.sourceDb}`)
+    srcDb = new Database(config.sourceDb, { readonly: true })
+    idxDb = new Database(indexPath, { create: true })
+    openIndex(idxDb)
+    migration = migrate(idxDb, modelTag(config), () => fileSize(indexPath))
+    if (migration.reset)
+      log(
+        `index reset (${migration.reason}); reclaimed ${(migration.reclaimedBytes / 1024 / 1024).toFixed(1)} MB, full reindex will follow`,
+      )
   } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e)
     log("recall init failed; plugin disabled", e)
-    return {}
+    return disabledPlugin(reason, logPath)
   }
 
-  // -------------------------------------------------------------- indexing
+  const notify = config.notify.enabled ? createNotifier(client, log) : noopNotify
+  if (migration.reset)
+    notify({
+      message: `Conversation index reset (${migration.reason}); reclaimed ${(migration.reclaimedBytes / 1024 / 1024).toFixed(0)} MB.`,
+      variant: "info",
+    })
 
-  type PartRow = { id: string; message_id: string; data: string }
-  type MsgRow = { id: string; role: string | null; time_created: number }
+  const source = new Source(srcDb)
+  const embedder = createEmbedder({
+    model: config.embed.model,
+    dims: config.embed.dims,
+    batch: config.embed.batch,
+    idleMs: config.embed.idleMs,
+    cacheDir: config.dataDir,
+    log,
+    notify,
+  })
+  const indexer = new Indexer({
+    idx: idxDb,
+    source,
+    embedder,
+    config,
+    log,
+    skipTools: OWN_TOOLS,
+    workerPrefix: WORKER_PREFIX,
+    notify,
+    afterReset: migration.reset,
+  })
+  const searcher = new SearchIndex(idxDb, source, embedder, config, log)
+  const summarizer = new Summarizer({ idx: idxDb, source, config, client, home, log })
 
-  const inFlight = new Set<string>()
-  const backfillState = { running: false, total: 0, done: 0, lastError: "", lastRun: 0 }
-
-  // Fire-and-forget work is tracked so dispose() can drain instead of yanking
-  // the ONNX session out from under an in-flight embed.
+  // Fire-and-forget work is tracked so shutdown can drain rather than yank the
+  // ONNX session out from under an in-flight embed.
   const pending = new Set<Promise<unknown>>()
-  function track(p: Promise<unknown>) {
+  const track = (p: Promise<unknown>) => {
     pending.add(p)
     p.catch(() => {}).finally(() => pending.delete(p))
   }
 
-  function purgeSession(sessionId: string) {
-    const rowids = idxDb
-      .query(`SELECT fts_rowid r FROM parts_indexed WHERE session_id=?`)
-      .all(sessionId) as { r: number }[]
-    const purge = idxDb.transaction(() => {
-      for (const { r } of rowids) idxDb.run(`DELETE FROM fts WHERE rowid=?`, [r])
-      idxDb.run(`DELETE FROM parts_indexed WHERE session_id=?`, [sessionId])
-      idxDb.run(`DELETE FROM chunks WHERE session_id=?`, [sessionId])
-      idxDb.run(`DELETE FROM indexed_sessions WHERE session_id=?`, [sessionId])
-      idxDb.run(`DELETE FROM sessions WHERE id=?`, [sessionId])
-    })
-    purge()
-  }
-
-  async function indexSession(sessionId: string): Promise<void> {
-    if (inFlight.has(sessionId)) return
-    inFlight.add(sessionId)
-    try {
-      const s = srcDb
-        .query(
-          `SELECT id, slug, title, directory, parent_id, time_created, time_updated FROM session WHERE id=?`,
-        )
-        .get(sessionId) as
-        | {
-            id: string
-            slug: string
-            title: string
-            directory: string
-            parent_id: string | null
-            time_created: number
-            time_updated: number
-          }
-        | null
-      if (!s) {
-        purgeSession(sessionId)
-        return
-      }
-      // Never index our own ephemeral summarizer workers (deleted after use anyway).
-      if (s.title?.startsWith(WORKER_PREFIX)) return
-      const wm = idxDb.query(`SELECT time_updated t FROM indexed_sessions WHERE session_id=?`).get(sessionId) as {
-        t: number
-      } | null
-      if (wm && wm.t >= s.time_updated) return
-
-      const messages = srcDb
-        .query(
-          `SELECT id, json_extract(data,'$.role') role, time_created
-           FROM message WHERE session_id=? ORDER BY time_created, id`,
-        )
-        .all(sessionId) as MsgRow[]
-      const roleOf = new Map(messages.map((m) => [m.id, m.role ?? "assistant"]))
-      const parts = srcDb
-        .query(`SELECT id, message_id, data FROM part WHERE session_id=? ORDER BY time_created, id`)
-        .all(sessionId) as PartRow[]
-
-      // ---- build FTS rows (all searchable text) and turn-pairs (embedded)
-      type FtsRow = { message_id: string; role: string; kind: string; time: number; text: string }
-      const ftsRows: FtsRow[] = []
-      const textByMessage = new Map<string, string[]>()
-      for (const p of parts) {
-        let d: any
-        try {
-          d = JSON.parse(p.data)
-        } catch {
-          continue
-        }
-        const role = roleOf.get(p.message_id) ?? "assistant"
-        const time = d.time?.start ?? d.time?.created ?? s.time_created
-        if (d.type === "text" && typeof d.text === "string" && d.text.trim()) {
-          ftsRows.push({ message_id: p.message_id, role, kind: "text", time, text: d.text })
-          const arr = textByMessage.get(p.message_id) ?? []
-          arr.push(d.text)
-          textByMessage.set(p.message_id, arr)
-        } else if (d.type === "reasoning" && typeof d.text === "string" && d.text.trim()) {
-          ftsRows.push({ message_id: p.message_id, role, kind: "reasoning", time, text: d.text })
-        } else if (d.type === "tool" && d.state?.status === "completed" && !OWN_TOOLS.has(d.tool)) {
-          const out = typeof d.state.output === "string" ? d.state.output.replace(ANSI_RE, "") : ""
-          const title = typeof d.state.title === "string" ? d.state.title : ""
-          const text = `${d.tool ?? "tool"} ${title}\n${out}`.slice(0, TOOL_OUTPUT_CHARS)
-          if (text.trim()) ftsRows.push({ message_id: p.message_id, role, kind: "tool", time, text })
-        }
-      }
-
-      type Pair = { message_id: string; time: number; user: string[]; assistant: string[] }
-      const pairs: Pair[] = []
-      let cur: Pair | null = null
-      for (const m of messages) {
-        const texts = textByMessage.get(m.id)
-        if (m.role === "user") {
-          cur = { message_id: m.id, time: m.time_created, user: texts ?? [], assistant: [] }
-          pairs.push(cur)
-        } else if (texts) {
-          if (!cur) {
-            cur = { message_id: m.id, time: m.time_created, user: [], assistant: [] }
-            pairs.push(cur)
-          }
-          cur.assistant.push(...texts)
-        }
-      }
-      const chunkTexts: { message_id: string; time: number; text: string; hash: string }[] = []
-      for (const pr of pairs) {
-        const u = clean(pr.user.join("\n"), PAIR_USER_CHARS)
-        const a = clean(pr.assistant.join("\n"), PAIR_ASSISTANT_CHARS)
-        if (!u && !a) continue
-        const text = (u ? `USER: ${u}\n` : "") + (a ? `ASSISTANT: ${a}` : "")
-        chunkTexts.push({ message_id: pr.message_id, time: pr.time, text, hash: String(Bun.hash(text)) })
-      }
-
-      // ---- embed only what this session doesn't already have (hash reuse)
-      const prior = new Map(
-        (idxDb.query(`SELECT hash, emb FROM chunks WHERE session_id=?`).all(sessionId) as {
-          hash: string
-          emb: Uint8Array
-        }[]).map((r) => [r.hash, r.emb]),
-      )
-      const need = chunkTexts.filter((c) => !prior.has(c.hash))
-      const fresh = new Map<string, Uint8Array>()
-      if (need.length) {
-        const embedder = await getEmbedder()
-        const vecs = await embedder.embed(need.map((c) => c.text))
-        need.forEach((c, i) => {
-          const v = vecs[i]
-          fresh.set(c.hash, new Uint8Array(v.buffer, v.byteOffset, DIMS * 4))
-        })
-      }
-
-      // ---- atomically replace this session in the index
-      const oldRowids = idxDb
-        .query(`SELECT fts_rowid r FROM parts_indexed WHERE session_id=?`)
-        .all(sessionId) as { r: number }[]
-      const write = idxDb.transaction(() => {
-        for (const { r } of oldRowids) idxDb.run(`DELETE FROM fts WHERE rowid=?`, [r])
-        idxDb.run(`DELETE FROM parts_indexed WHERE session_id=?`, [sessionId])
-        idxDb.run(`DELETE FROM chunks WHERE session_id=?`, [sessionId])
-        for (const c of chunkTexts) {
-          const emb = fresh.get(c.hash) ?? prior.get(c.hash)!
-          idxDb.run(`INSERT INTO chunks(session_id,message_id,time,hash,text,emb) VALUES (?,?,?,?,?,?)`, [
-            sessionId,
-            c.message_id,
-            c.time,
-            c.hash,
-            c.text,
-            emb,
-          ])
-        }
-        for (const f of ftsRows) {
-          const res = idxDb.run(`INSERT INTO fts(text,session_id,message_id,role,kind,time) VALUES (?,?,?,?,?,?)`, [
-            f.text,
-            sessionId,
-            f.message_id,
-            f.role,
-            f.kind,
-            f.time,
-          ])
-          idxDb.run(`INSERT INTO parts_indexed(fts_rowid,session_id) VALUES (?,?)`, [
-            Number(res.lastInsertRowid),
-            sessionId,
-          ])
-        }
-        idxDb.run(
-          `INSERT INTO sessions(id,slug,title,directory,parent_id,time_created,time_updated)
-           VALUES (?,?,?,?,?,?,?)
-           ON CONFLICT(id) DO UPDATE SET slug=excluded.slug, title=excluded.title, directory=excluded.directory,
-             parent_id=excluded.parent_id, time_updated=excluded.time_updated`,
-          [s.id, s.slug, s.title, s.directory, s.parent_id, s.time_created, s.time_updated],
-        )
-        idxDb.run(
-          `INSERT INTO indexed_sessions(session_id,time_updated,chunks,fts_rows) VALUES (?,?,?,?)
-           ON CONFLICT(session_id) DO UPDATE SET time_updated=excluded.time_updated,
-             chunks=excluded.chunks, fts_rows=excluded.fts_rows`,
-          [sessionId, s.time_updated, chunkTexts.length, ftsRows.length],
-        )
-      })
-      write()
-    } finally {
-      inFlight.delete(sessionId)
-    }
-  }
-
-  async function backfill(): Promise<void> {
-    if (backfillState.running) return
-    backfillState.running = true
-    backfillState.lastRun = Date.now()
-    try {
-      const source = srcDb.query(`SELECT id, time_updated t FROM session ORDER BY time_updated DESC`).all() as {
-        id: string
-        t: number
-      }[]
-      const wms = new Map(
-        (idxDb.query(`SELECT session_id s, time_updated t FROM indexed_sessions`).all() as {
-          s: string
-          t: number
-        }[]).map((r) => [r.s, r.t]),
-      )
-      const stale = source.filter((s) => (wms.get(s.id) ?? 0) < s.t)
-      backfillState.total = stale.length
-      backfillState.done = 0
-      if (stale.length) log(`backfill: ${stale.length} stale sessions`)
-      for (const s of stale) {
-        try {
-          await indexSession(s.id)
-        } catch (e) {
-          backfillState.lastError = `${s.id}: ${e}`
-          log("backfill index error", s.id, e)
-        }
-        backfillState.done++
-        await Bun.sleep(15)
-      }
-      // purge sessions that no longer exist in the source
-      const alive = new Set(source.map((s) => s.id))
-      for (const [sid] of wms) if (!alive.has(sid)) purgeSession(sid)
-      if (stale.length) {
-        log(`backfill complete: ${backfillState.done}/${backfillState.total}`)
-        Bun.gc(true) // release JSON-parse garbage from the one-time bulk pass
-      }
-    } catch (e) {
-      backfillState.lastError = String(e)
-      log("backfill failed", e)
-    } finally {
-      backfillState.running = false
-    }
-  }
+  const runBackfill = () =>
+    indexer.backfill(new BackfillLease(idxDb, config.backfill.leaseMs))
 
   const startTimer = setTimeout(
-    () => track(backfill()),
-    BACKFILL_DELAY_MS + Math.floor(Math.random() * 10_000),
+    () => track(runBackfill()),
+    config.backfill.delayMs + Math.floor(Math.random() * 10_000),
   )
   startTimer.unref?.()
 
-  // -------------------------------------------------------------- search
+  const counts = () => ({
+    chunks: (idxDb.query(`SELECT count(*) c FROM chunks`).get() as { c: number }).c,
+    ftsRows: (idxDb.query(`SELECT count(*) c FROM parts`).get() as { c: number }).c,
+    indexed: (idxDb.query(`SELECT count(*) c FROM indexed_sessions`).get() as { c: number }).c,
+    total: source.sessionCount(),
+  })
 
-  type Hit = { session_id: string; message_id: string; time: number; snippet: string; via: string }
+  const sh = (dir: string) => shortDir(dir, home)
 
-  type SearchOpts = {
-    since: number
-    until: number
-    includeTools: boolean
-    whitelist: Set<string> | null
-    exclude: string
-    /** Current-session hits BEFORE this time are pre-compaction (out of the
-     *  model's context) and therefore allowed; 0 = never compacted = exclude all. */
-    excludeBefore: number
-    /** Restrict lexical search to one session AT THE SQL LEVEL — a post-filter
-     *  would miss hits for globally common terms whose top-500 BM25 rows all
-     *  live in other sessions. */
-    sessionFilter?: string
+  /** Resolve a session id or slug, with a note when a slug was ambiguous. */
+  function resolve(idOrSlug: string, verb: string): { s: SessionRow; note: string } | null {
+    const candidates = source.findSession(idOrSlug)
+    const s = candidates[0]
+    if (!s) return null
+    const note =
+      s.id !== idOrSlug && candidates.length > 1
+        ? `NOTE: ${candidates.length}+ sessions share slug '${idOrSlug}'; ${verb} the most recent. Others: ${candidates
+            .slice(1)
+            .map((c) => `${c.id} (${c.title.slice(0, 40)}, ${fmtDate(c.time_updated)})`)
+            .join("; ")}\n`
+        : ""
+    return { s, note }
   }
 
-  /** Current-session content is excluded only if the model can still see it. */
-  function isExcluded(opts: SearchOpts, sessionId: string, time: number): boolean {
-    return sessionId === opts.exclude && time >= opts.excludeBefore
+  function header(s: SessionRow, note: string): string {
+    return `${note}# ${s.title}\nsession_id=${s.id} slug=${s.slug} · ${sh(s.directory)} · ${fmtDate(s.time_created)} → ${fmtDate(s.time_updated)}`
   }
 
-  /** Time of the latest compaction summary message, or 0 if never compacted. */
-  function compactionBoundary(sessionId: string): number {
-    try {
-      const row = srcDb
-        .query(
-          `SELECT max(time_created) t FROM message
-           WHERE session_id=? AND json_extract(data,'$.role')='assistant' AND json_extract(data,'$.summary')=1`,
-        )
-        .get(sessionId) as { t: number | null } | null
-      return row?.t ?? 0
-    } catch {
-      return 0
-    }
-  }
-
-  type SessionRow = {
-    id: string
-    slug: string
-    title: string
-    directory: string
-    time_created: number
-    time_updated: number
-  }
-
-  /** Resolve a ses_ id or slug. Slugs are NOT unique; exact id wins, else newest. */
-  function findSession(idOrSlug: string): SessionRow[] {
-    return srcDb
-      .query(
-        `SELECT id, slug, title, directory, time_created, time_updated FROM session
-         WHERE id=? OR slug=? ORDER BY (id=?) DESC, time_updated DESC LIMIT 5`,
-      )
-      .all(idOrSlug, idOrSlug, idOrSlug) as SessionRow[]
-  }
-
-  /** One transcript block per message: collapsed tool one-liners + trimmed text. */
-  function renderMessage(m: MsgRow, maxChars: number): string | null {
-    const parts = srcDb
-      .query(`SELECT data FROM part WHERE message_id=? ORDER BY time_created, id`)
-      .all(m.id) as { data: string }[]
-    const texts: string[] = []
-    const tools: string[] = []
-    let lastTool = ""
-    let lastToolCount = 0
-    const flushTool = () => {
-      if (!lastToolCount) return
-      tools.push(lastToolCount > 1 ? `${lastTool} (×${lastToolCount})` : lastTool)
-      lastToolCount = 0
-    }
-    for (const p of parts) {
+  async function branches(query: string, mode: string, f: Filters): Promise<{ lex: Hit[]; sem: Hit[] }> {
+    const lex = mode === "semantic" ? [] : searcher.lexical(query, f)
+    let sem: Hit[] = []
+    if (mode !== "lexical") {
       try {
-        const d = JSON.parse(p.data)
-        if (d.type === "text" && typeof d.text === "string" && d.text.trim()) texts.push(d.text)
-        else if (d.type === "tool" && d.tool) {
-          const line = `[tool ${d.tool}] ${clean(String(d.state?.title ?? ""), 80)}`.trimEnd()
-          if (line === lastTool) lastToolCount++
-          else {
-            flushTool()
-            lastTool = line
-            lastToolCount = 1
-          }
-        }
-      } catch {}
-    }
-    flushTool()
-    const body = [...tools, texts.length ? clean(texts.join("\n"), maxChars) : ""].filter(Boolean).join("\n")
-    if (!body) return null
-    return `── ${m.role ?? "assistant"} @ ${fmtDateTime(m.time_created)} (${m.id})\n${body}`
-  }
-
-  /** Compact whole-session transcript for the summarizer, middle-out truncated
-   *  (goals live at the start of a session, outcomes at the end). */
-  function fullTranscript(sessionId: string, budget: number): { text: string; messages: number } {
-    const messages = srcDb
-      .query(
-        `SELECT id, json_extract(data,'$.role') role, time_created
-         FROM message WHERE session_id=? ORDER BY time_created, id`,
-      )
-      .all(sessionId) as MsgRow[]
-    const blocks: string[] = []
-    for (const m of messages) {
-      const b = renderMessage(m, SUMMARY_MSG_CHARS)
-      if (b) blocks.push(b)
-    }
-    const total = blocks.reduce((n, b) => n + b.length + 1, 0)
-    if (total > budget) {
-      const head: string[] = []
-      const tail: string[] = []
-      let used = 0
-      let lo = 0
-      let hi = blocks.length - 1
-      while (lo <= hi) {
-        const takeHead = head.length <= tail.length
-        const b = takeHead ? blocks[lo] : blocks[hi]
-        if (used + b.length + 1 > budget) break
-        used += b.length + 1
-        if (takeHead) {
-          head.push(blocks[lo])
-          lo++
-        } else {
-          tail.unshift(blocks[hi])
-          hi--
-        }
-      }
-      const omitted = hi - lo + 1
-      return {
-        text: [...head, `[... ${omitted} of ${blocks.length} messages omitted ...]`, ...tail].join("\n"),
-        messages: messages.length,
+        sem = await searcher.semantic(query, f)
+      } catch (e) {
+        log("semantic search failed, falling back to lexical", e)
       }
     }
-    return { text: blocks.join("\n"), messages: messages.length }
+    return { lex, sem }
   }
-
-  // ------------------------------------------------------------ summarizer
-
-  type SummaryResult = { summary: string; cachedAt?: number; secs?: number; messages?: number }
-  // In-flight dedupe: concurrent requests for the same (session, focus) share one worker.
-  const inFlightSummaries = new Map<string, Promise<SummaryResult>>()
-  const summaryModelTag = `${SUMMARY_MODEL.providerID}/${SUMMARY_MODEL.modelID}`
-
-  /** Summarize one session via an ephemeral tool-less worker; cached permanently. */
-  function summarizeSession(s: SessionRow, focus: string, refresh: boolean, abort?: AbortSignal): Promise<SummaryResult> {
-    const key = `${s.id}\u0000${focus}`
-    if (!refresh) {
-      const cached = idxDb
-        .query(`SELECT time_updated, summary, created FROM summaries WHERE session_id=? AND model=? AND focus=?`)
-        .get(s.id, summaryModelTag, focus) as { time_updated: number; summary: string; created: number } | null
-      if (cached && cached.time_updated === s.time_updated)
-        return Promise.resolve({ summary: cached.summary, cachedAt: cached.created })
-      const inflight = inFlightSummaries.get(key)
-      if (inflight) return inflight
-    }
-    const p = (async (): Promise<SummaryResult> => {
-      const { text: transcript, messages } = fullTranscript(s.id, SUMMARY_CHAR_BUDGET)
-      if (!transcript) throw new Error("session has no transcript content")
-      const system = focus
-        ? "You answer questions about a recorded OpenCode agent session transcript. Answer ONLY from the transcript. Be specific: name files, commands, ids, and decisions. If the transcript does not contain the answer, say so plainly. No preamble."
-        : "You summarize recorded OpenCode agent session transcripts. Produce a tight summary structured as: Goal; What was done (bullets); Key decisions & why; Gotchas/discoveries; Final state; Loose ends. Be specific — name files, commands, and ids. At most 350 words. No preamble."
-      const task = `${focus ? `QUESTION: ${focus}` : "Summarize this session."}\n\nSESSION: ${s.title} (${shortDir(s.directory)}, ${fmtDate(s.time_created)})\nTRANSCRIPT:\n${transcript}`
-
-      if (abort?.aborted) throw new Error("aborted")
-      const t0 = performance.now()
-      const created = await client.session.create({ body: { title: `${WORKER_PREFIX}${s.id}` } })
-      const worker: string | undefined = created?.data?.id
-      if (!worker)
-        throw new Error(`failed to create worker session: ${clean(JSON.stringify(created?.error ?? created ?? null), 300)}`)
-      try {
-        const racers: Promise<any>[] = [
-          client.session.prompt({
-            path: { id: worker },
-            body: {
-              model: SUMMARY_MODEL,
-              system,
-              tools: { "*": false },
-              parts: [{ type: "text", text: task }],
-            },
-          }),
-          Bun.sleep(SUMMARY_TIMEOUT_MS).then(() => {
-            throw new Error(`summarizer timed out after ${SUMMARY_TIMEOUT_MS / 1000}s`)
-          }),
-        ]
-        if (abort)
-          racers.push(
-            new Promise<never>((_, reject) =>
-              abort.addEventListener("abort", () => reject(new Error("aborted")), { once: true }),
-            ),
-          )
-        const res: any = await Promise.race(racers)
-        if (res?.error) throw new Error(clean(JSON.stringify(res.error), 300))
-        const parts: any[] = res?.data?.parts ?? []
-        const summary = parts
-          .filter((p) => p.type === "text" && typeof p.text === "string")
-          .map((p) => p.text)
-          .join("\n")
-          .trim()
-        if (!summary) {
-          const err = res?.data?.info?.error
-          throw new Error(err ? clean(JSON.stringify(err), 300) : "summarizer returned no text")
-        }
-        idxDb.run(
-          `INSERT INTO summaries(session_id,model,focus,time_updated,summary,created) VALUES (?,?,?,?,?,?)
-           ON CONFLICT(session_id,model,focus) DO UPDATE SET time_updated=excluded.time_updated,
-             summary=excluded.summary, created=excluded.created`,
-          [s.id, summaryModelTag, focus, s.time_updated, summary, Date.now()],
-        )
-        return { summary, secs: (performance.now() - t0) / 1000, messages }
-      } finally {
-        void client.session
-          .delete({ path: { id: worker } })
-          .catch((e: unknown) => log("summarizer worker delete failed", worker, e))
-      }
-    })()
-    inFlightSummaries.set(key, p)
-    p.catch(() => {}).finally(() => {
-      if (inFlightSummaries.get(key) === p) inFlightSummaries.delete(key)
-    })
-    return p
-  }
-
-  /** Simple promise pool; JS is single-threaded so the shared cursor is safe. */
-  async function pool<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-    const out: R[] = new Array(items.length)
-    let next = 0
-    await Promise.all(
-      Array.from({ length: Math.min(limit, items.length) }, async () => {
-        while (next < items.length) {
-          const i = next++
-          out[i] = await fn(items[i])
-        }
-      }),
-    )
-    return out
-  }
-
-  function sessionWhitelist(directory?: string): Set<string> | null {
-    if (!directory) return null
-    const rows = idxDb.query(`SELECT id FROM sessions WHERE directory LIKE ?`).all(`%${directory}%`) as {
-      id: string
-    }[]
-    return new Set(rows.map((r) => r.id))
-  }
-
-  function lexicalSearch(query: string, opts: SearchOpts): Hit[] {
-    const run = (match: string): Hit[] => {
-      const rows = idxDb
-        .query(
-          `SELECT session_id, message_id, kind, CAST(time AS INTEGER) time,
-                  snippet(fts, 0, '«', '»', '…', 14) snip
-           FROM fts WHERE fts MATCH ?${opts.sessionFilter ? " AND session_id=?" : ""} ORDER BY bm25(fts) LIMIT 500`,
-        )
-        .all(...(opts.sessionFilter ? [match, opts.sessionFilter] : [match])) as {
-        session_id: string
-        message_id: string
-        kind: string
-        time: number
-        snip: string
-      }[]
-      const out: Hit[] = []
-      for (const r of rows) {
-        if (isExcluded(opts, r.session_id, r.time)) continue
-        if (r.time < opts.since || r.time > opts.until) continue
-        if (!opts.includeTools && r.kind === "tool") continue
-        if (opts.whitelist && !opts.whitelist.has(r.session_id)) continue
-        out.push({
-          session_id: r.session_id,
-          message_id: r.message_id,
-          time: r.time,
-          snippet: clean(r.snip, 220),
-          via: `lexical/${r.kind}`,
-        })
-        if (out.length >= CANDIDATES) break
-      }
-      return out
-    }
-    const andQ = ftsQuery(query, "AND")
-    if (!andQ) return []
-    try {
-      let hits = run(andQ)
-      if (!hits.length && /\s/.test(query.trim())) {
-        const orQ = ftsQuery(query, "OR")
-        if (orQ) hits = run(orQ)
-      }
-      return hits
-    } catch (e) {
-      log("lexical search error", e)
-      return []
-    }
-  }
-
-  // In-memory embedding matrix, rebuilt only when the chunks table changes.
-  // Avoids re-reading ~45MB of blobs from SQLite on every semantic search.
-  // AUTOINCREMENT ids never get reused, so (count, max id) is a reliable signature.
-  type Matrix = {
-    sig: string
-    n: number
-    mat: Float32Array
-    ids: Float64Array
-    times: Float64Array
-    sessions: string[]
-    messages: string[]
-  }
-  let matrix: Matrix | null = null
-
-  function loadMatrix(): Matrix {
-    const s = idxDb.query(`SELECT count(*) c, COALESCE(max(id),0) m FROM chunks`).get() as { c: number; m: number }
-    const sig = `${s.c}:${s.m}`
-    if (matrix?.sig === sig) return matrix
-    const next: Matrix = {
-      sig,
-      n: s.c,
-      mat: new Float32Array(s.c * DIMS),
-      ids: new Float64Array(s.c),
-      times: new Float64Array(s.c),
-      sessions: new Array(s.c),
-      messages: new Array(s.c),
-    }
-    let i = 0
-    let lastId = 0
-    while (i < s.c) {
-      const rows = idxDb
-        .query(`SELECT id, session_id, message_id, time, emb FROM chunks WHERE id > ? ORDER BY id LIMIT 4000`)
-        .all(lastId) as { id: number; session_id: string; message_id: string; time: number; emb: Uint8Array }[]
-      if (!rows.length) break
-      for (const r of rows) {
-        lastId = r.id
-        next.mat.set(toVec(r.emb), i * DIMS)
-        next.ids[i] = r.id
-        next.times[i] = r.time
-        next.sessions[i] = r.session_id
-        next.messages[i] = r.message_id
-        i++
-      }
-    }
-    next.n = i
-    matrix = next
-    return next
-  }
-
-  async function semanticSearch(query: string, opts: SearchOpts): Promise<Hit[]> {
-    const embedder = await getEmbedder()
-    const [qvec] = await embedder.embed([QUERY_PREFIX + query])
-    const m = loadMatrix()
-    const scored: { score: number; i: number }[] = []
-    for (let i = 0; i < m.n; i++) {
-      if (m.times[i] < opts.since || m.times[i] > opts.until) continue
-      if (isExcluded(opts, m.sessions[i], m.times[i])) continue
-      if (opts.whitelist && !opts.whitelist.has(m.sessions[i])) continue
-      scored.push({ score: dot(qvec, m.mat.subarray(i * DIMS, (i + 1) * DIMS) as Float32Array), i })
-    }
-    scored.sort((a, b) => b.score - a.score)
-    const hits: Hit[] = []
-    for (const t of scored.slice(0, CANDIDATES)) {
-      const row = idxDb.query(`SELECT text FROM chunks WHERE id=?`).get(m.ids[t.i]) as { text: string } | null
-      hits.push({
-        session_id: m.sessions[t.i],
-        message_id: m.messages[t.i],
-        time: m.times[t.i],
-        snippet: clean(row?.text ?? "", 220),
-        via: `semantic ${t.score.toFixed(2)}`,
-      })
-    }
-    return hits
-  }
-
-  function indexCounts() {
-    const chunks = (idxDb.query(`SELECT count(*) c FROM chunks`).get() as { c: number }).c
-    const indexed = (idxDb.query(`SELECT count(*) c FROM indexed_sessions`).get() as { c: number }).c
-    const total = (srcDb.query(`SELECT count(*) c FROM session`).get() as { c: number }).c
-    return { chunks, indexed, total }
-  }
-
-  // -------------------------------------------------------------- hooks
 
   return {
+    config: async (cfg) => {
+      // Only register the worker agent if summarisation is actually usable;
+      // otherwise a machine without this provider gets a hidden agent pointing
+      // at a model it cannot reach.
+      if (!config.summary.enabled) return
+      cfg.agent ??= {}
+      cfg.agent[config.summary.agent] = {
+        model: `${config.summary.model.providerID}/${config.summary.model.modelID}`,
+        variant: config.summary.model.variant,
+        mode: "subagent",
+        hidden: true,
+      }
+    },
+
     dispose: async () => {
       try {
         clearTimeout(startTimer)
-        // Drain in-flight indexing (capped) before touching the embedder.
         if (pending.size) await Promise.race([Promise.allSettled([...pending]), Bun.sleep(8_000)])
-        const p = embedderP
-        embedderP = null
-        // Only dispose the ONNX session if nothing is still using it; on process
-        // exit the OS reclaims it anyway, and disposing mid-embed is noisy.
-        if (p && !pending.size) await p.then((e) => e.dispose()).catch(() => {})
+        embedder.shutdown()
         idxDb.close()
         srcDb.close()
       } catch {}
@@ -887,10 +241,10 @@ export const RecallPlugin: Plugin = async (input) => {
       try {
         if (event.type === "session.idle") {
           const sid = (event as any).properties?.sessionID
-          if (sid) track(indexSession(sid).catch((e) => log("idle index error", sid, e)))
+          if (sid) track(indexer.indexSession(sid).catch((e) => log("idle index error", sid, e)))
         } else if (event.type === "session.deleted") {
           const sid = (event as any).properties?.info?.id
-          if (sid) purgeSession(sid)
+          if (sid) indexer.purge(sid)
         }
       } catch (e) {
         log("event hook error", e)
@@ -917,68 +271,51 @@ export const RecallPlugin: Plugin = async (input) => {
             .boolean()
             .optional()
             .describe("Include tool outputs (bash/file contents) in lexical matching (default true)"),
-          limit: tool.schema.number().optional().describe("Max sessions returned (default 8)"),
+          limit: tool.schema.number().optional().describe("Max sessions returned (default 8, max 25)"),
         },
         async execute(args, ctx) {
-          const counts = indexCounts()
-          if (!counts.indexed) {
-            void backfill()
-            return `Index is empty — backfill just started (${counts.total} sessions to index, ETA a few minutes). Retry shortly; recall_status shows progress.`
+          const c = counts()
+          if (!c.indexed) {
+            track(runBackfill())
+            return `Index is empty — backfill just started (${c.total} sessions to index, ETA a few minutes). Retry shortly; recall_status shows progress.`
           }
-          const opts: SearchOpts = {
+          const f: Filters = {
             since: parseWhen(args.since, 0),
             until: parseWhen(args.until, Number.MAX_SAFE_INTEGER),
             includeTools: args.include_tools !== false,
-            whitelist: sessionWhitelist(args.directory),
-            exclude: ctx.sessionID,
-            excludeBefore: compactionBoundary(ctx.sessionID),
+            directory: args.directory,
+            excludeSession: ctx.sessionID,
+            excludeBefore: source.compactionBoundary(ctx.sessionID),
           }
           const mode = args.mode ?? "hybrid"
-          const lex = mode === "semantic" ? [] : lexicalSearch(args.query, opts)
-          let sem: Hit[] = []
-          if (mode !== "lexical") {
-            try {
-              sem = await semanticSearch(args.query, opts)
-            } catch (e) {
-              log("semantic search failed, falling back to lexical", e)
-            }
-          }
+          const { lex, sem } = await branches(args.query, mode, f)
 
-          // Reciprocal Rank Fusion, grouped by session
-          type Group = { score: number; hits: Hit[]; nLex: number; nSem: number }
-          const groups = new Map<string, Group>()
-          const fuse = (hits: Hit[], which: "lex" | "sem") => {
-            hits.forEach((h, rank) => {
-              const g = groups.get(h.session_id) ?? { score: 0, hits: [], nLex: 0, nSem: 0 }
-              const n = which === "lex" ? g.nLex : g.nSem
-              // Only the best 3 hits per branch count toward the session score,
-              // so many weak matches can't drown out a single strong one.
-              if (n < 3) g.score += 1 / (RRF_K + rank)
-              if (g.hits.length < 2 && !g.hits.some((x) => x.message_id === h.message_id || x.snippet === h.snippet))
-                g.hits.push(h)
-              which === "lex" ? g.nLex++ : g.nSem++
-              groups.set(h.session_id, g)
-            })
-          }
-          fuse(lex, "lex")
-          fuse(sem, "sem")
-          if (!groups.size)
-            return `No matches for "${args.query}" (${mode}). Try mode=semantic for fuzzy recall, fewer/different keywords, or drop filters. Index: ${counts.indexed}/${counts.total} sessions.`
+          const groups = fuse(
+            [
+              { hits: lex, which: "lex" as const },
+              { hits: sem, which: "sem" as const },
+            ],
+            (h) => h.session_id,
+            { rrfK: config.search.rrfK, perBranchCap: 3, hitsPerKey: 2 },
+          )
+          if (!groups.length)
+            return `No matches for "${args.query}" (${mode}). Try mode=semantic for fuzzy recall, fewer/different keywords, or drop filters. Index: ${c.indexed}/${c.total} sessions.`
 
-          const ranked = [...groups.entries()].sort((a, b) => b[1].score - a[1].score).slice(0, args.limit ?? 8)
+          const ranked = groups.slice(0, clampInt(args.limit, 1, 25, 8))
+          const shown = ranked.flatMap((g) => g.hits)
+          const snippets = searcher.snippets(shown, args.query)
+
           const lines: string[] = [
-            `index: ${counts.indexed}/${counts.total} sessions, ${counts.chunks} chunks${backfillState.running ? ` · backfill ${backfillState.done}/${backfillState.total} running` : ""}`,
+            `index: ${c.indexed}/${c.total} sessions, ${c.chunks} chunks${indexer.state.running ? ` · backfill ${indexer.state.done}/${indexer.state.total} running` : ""}`,
           ]
-          ranked.forEach(([sid, g], i) => {
-            const s = idxDb
-              .query(`SELECT slug, title, directory, time_updated FROM sessions WHERE id=?`)
-              .get(sid) as { slug: string; title: string; directory: string; time_updated: number } | null
+          ranked.forEach((g, i) => {
+            const s = source.session(g.key)
             const best = g.hits[0]
-            const self = sid === ctx.sessionID ? " ← THIS session, before its last compaction" : ""
+            const self = g.key === ctx.sessionID ? " ← THIS session, before its last compaction" : ""
             lines.push(
-              `${i + 1}. ${s?.title ?? "(untitled)"} — ${fmtDate(s?.time_updated ?? best.time)} · ${shortDir(s?.directory ?? "?")}${self}`,
-              `   session_id=${sid} message_id=${best.message_id} matches(lex=${g.nLex},sem=${g.nSem})`,
-              ...g.hits.map((h) => `   [${h.via}] ${h.snippet}`),
+              `${i + 1}. ${s?.title ?? "(untitled)"} — ${fmtDate(s?.time_updated ?? best.time)} · ${sh(s?.directory ?? "?")}${self}`,
+              `   session_id=${g.key} message_id=${best.message_id} matches(lex=${g.nLex},sem=${g.nSem})`,
+              ...g.hits.map((h) => `   [${h.via}] ${snippets.get(h) ?? ""}`),
             )
           })
           lines.push(
@@ -997,30 +334,18 @@ export const RecallPlugin: Plugin = async (input) => {
             .string()
             .optional()
             .describe("Center the window on this message (msg_...); defaults to the end of the session"),
-          window: tool.schema.number().optional().describe("Number of messages to include (default 12)"),
-          max_chars: tool.schema.number().optional().describe("Max characters per message (default 800)"),
+          window: tool.schema.number().optional().describe("Number of messages to include (default 12, max 60)"),
+          max_chars: tool.schema.number().optional().describe("Max characters per message (default 800, max 4000)"),
         },
         async execute(args) {
-          const candidates = findSession(args.session_id)
-          const s = candidates[0]
-          if (!s) return `No session found for '${args.session_id}'.`
-          const ambiguous =
-            s.id !== args.session_id && candidates.length > 1
-              ? `NOTE: ${candidates.length}+ sessions share slug '${args.session_id}'; showing the most recent. Others: ${candidates
-                  .slice(1)
-                  .map((c) => `${c.id} (${c.title.slice(0, 40)}, ${fmtDate(c.time_updated)})`)
-                  .join("; ")}\n`
-              : ""
-          const messages = srcDb
-            .query(
-              `SELECT id, json_extract(data,'$.role') role, time_created
-               FROM message WHERE session_id=? ORDER BY time_created, id`,
-            )
-            .all(s.id) as MsgRow[]
+          const found = resolve(args.session_id, "showing")
+          if (!found) return `No session found for '${args.session_id}'.`
+          const { s, note } = found
+          const messages = source.messages(s.id)
           if (!messages.length) return `Session ${s.id} has no messages.`
 
-          const window = Math.max(2, Math.min(args.window ?? 12, 60))
-          const maxChars = Math.max(100, Math.min(args.max_chars ?? 800, 4000))
+          const window = clampInt(args.window, 2, 60, 12)
+          const maxChars = clampInt(args.max_chars, 100, 4000, 800)
           let center = messages.length - 1
           if (args.message_id) {
             const i = messages.findIndex((m) => m.id === args.message_id)
@@ -1030,14 +355,13 @@ export const RecallPlugin: Plugin = async (input) => {
           const slice = messages.slice(start, start + window)
 
           const lines: string[] = [
-            ambiguous + `# ${s.title}`,
-            `session_id=${s.id} slug=${s.slug} · ${shortDir(s.directory)} · ${fmtDate(s.time_created)} → ${fmtDate(s.time_updated)}`,
+            header(s, note),
             `messages ${start + 1}-${start + slice.length} of ${messages.length}`,
             "",
           ]
           let budget = 20_000
           for (const m of slice) {
-            const rendered = renderMessage(m, maxChars)
+            const rendered = source.renderMessage(m, maxChars)
             if (!rendered) continue
             const block = `${rendered}\n`
             if (block.length > budget) break
@@ -1054,10 +378,7 @@ export const RecallPlugin: Plugin = async (input) => {
           "Look inside ONE past session — the cheap, instant first stop after recall_search finds it, before reaching for recall_summarize. With a query: hybrid-search within that session, returning message-level hits in chronological order with message_ids ready for recall_expand. Without a query: an outline of the session's user turns (its intent skeleton). Purely local — no worker model, no wait.",
         args: {
           session_id: tool.schema.string().describe("Session id (ses_...) or slug from recall_search"),
-          query: tool.schema
-            .string()
-            .optional()
-            .describe("Search within the session (omit for a user-turn outline)"),
+          query: tool.schema.string().optional().describe("Search within the session (omit for a user-turn outline)"),
           mode: tool.schema
             .enum(["hybrid", "lexical", "semantic"])
             .optional()
@@ -1066,56 +387,31 @@ export const RecallPlugin: Plugin = async (input) => {
             .boolean()
             .optional()
             .describe("Include tool outputs (bash/file contents) in lexical matching (default true)"),
-          limit: tool.schema.number().optional().describe("Max hits in query mode (default 12)"),
+          limit: tool.schema.number().optional().describe("Max hits in query mode (default 12, max 30)"),
         },
         async execute(args, ctx) {
-          const candidates = findSession(args.session_id)
-          const s = candidates[0]
-          if (!s) return `No session found for '${args.session_id}'.`
-          const ambiguous =
-            s.id !== args.session_id && candidates.length > 1
-              ? `NOTE: ${candidates.length}+ sessions share slug '${args.session_id}'; inspecting the most recent. Others: ${candidates
-                  .slice(1)
-                  .map((c) => `${c.id} (${c.title.slice(0, 40)}, ${fmtDate(c.time_updated)})`)
-                  .join("; ")}\n`
-              : ""
-          const header =
-            ambiguous +
-            `# ${s.title}\nsession_id=${s.id} slug=${s.slug} · ${shortDir(s.directory)} · ${fmtDate(s.time_created)} → ${fmtDate(s.time_updated)}`
+          const found = resolve(args.session_id, "inspecting")
+          if (!found) return `No session found for '${args.session_id}'.`
+          const { s, note } = found
+          const head = header(s, note)
 
-          // ---- outline mode: chronological user-turn TOC
           if (!args.query?.trim()) {
-            const total = (srcDb.query(`SELECT count(*) c FROM message WHERE session_id=?`).get(s.id) as { c: number })
-              .c
-            const turns = (
-              srcDb
-                .query(
-                  `SELECT m.id, m.time_created t,
-                          (SELECT json_extract(p.data,'$.text') FROM part p
-                           WHERE p.message_id=m.id AND json_extract(p.data,'$.type')='text'
-                           ORDER BY p.time_created, p.id LIMIT 1) txt
-                   FROM message m
-                   WHERE m.session_id=? AND json_extract(m.data,'$.role')='user'
-                   ORDER BY m.time_created, m.id`,
-                )
-                .all(s.id) as { id: string; t: number; txt: string | null }[]
-            ).filter((r) => r.txt && r.txt.trim())
-            const line = (r: { id: string; t: number; txt: string | null }, i: number) =>
-              `${i + 1}. ${fmtDateTime(r.t)} (${r.id}) ${clean(r.txt!, 120)}`
-            let toc: string[]
-            if (turns.length > 60) {
-              toc = [
-                ...turns.slice(0, 30).map(line),
-                `[... ${turns.length - 60} turns omitted — search them with query=... ]`,
-                ...turns.slice(-30).map((r, i) => line(r, turns.length - 30 + i)),
-              ]
-            } else {
-              toc = turns.map(line)
-            }
+            const total = source.messageCount(s.id)
+            const turns = source.userTurns(s.id)
+            const line = (r: { id: string; t: number; txt: string }, i: number) =>
+              `${i + 1}. ${fmtDateTime(r.t)} (${r.id}) ${clean(r.txt, 120)}`
+            const toc =
+              turns.length > 60
+                ? [
+                    ...turns.slice(0, 30).map(line),
+                    `[... ${turns.length - 60} turns omitted — search them with query=... ]`,
+                    ...turns.slice(-30).map((r, i) => line(r, turns.length - 30 + i)),
+                  ]
+                : turns.map(line)
             return {
               title: `recall inspect: ${s.title}`,
               output: [
-                header,
+                head,
                 `${total} messages · ${turns.length} user turns`,
                 "",
                 "USER TURNS:",
@@ -1126,54 +422,53 @@ export const RecallPlugin: Plugin = async (input) => {
             }
           }
 
-          // ---- query mode: scoped hybrid search, message-level hits
-          const opts: SearchOpts = {
+          const f: Filters = {
             since: 0,
             until: Number.MAX_SAFE_INTEGER,
             includeTools: args.include_tools !== false,
-            whitelist: new Set([s.id]),
-            exclude: ctx.sessionID,
-            excludeBefore: compactionBoundary(ctx.sessionID),
-            sessionFilter: s.id,
+            sessionId: s.id,
+            excludeSession: ctx.sessionID,
+            excludeBefore: source.compactionBoundary(ctx.sessionID),
           }
           const mode = args.mode ?? "hybrid"
-          const lex = mode === "semantic" ? [] : lexicalSearch(args.query, opts)
-          let sem: Hit[] = []
-          if (mode !== "lexical") {
-            try {
-              sem = await semanticSearch(args.query, opts)
-              if (mode === "hybrid")
-                sem = sem.filter((h) => parseFloat(h.via.split(" ")[1] ?? "0") >= INSPECT_SEM_MIN)
-            } catch (e) {
-              log("inspect semantic failed, lexical only", e)
-            }
-          }
-          type Fused = { score: number; hit: Hit; nLex: number; nSem: number }
-          const fused = new Map<string, Fused>()
-          const add = (hits: Hit[], which: "lex" | "sem") => {
-            hits.forEach((h, rank) => {
-              const key = `${h.message_id}|${h.snippet.slice(0, 60)}`
-              const g = fused.get(key) ?? { score: 0, hit: h, nLex: 0, nSem: 0 }
-              g.score += 1 / (RRF_K + rank)
-              which === "lex" ? g.nLex++ : g.nSem++
-              fused.set(key, g)
-            })
-          }
-          add(lex, "lex")
-          add(sem, "sem")
-          if (!fused.size) {
+          let { lex, sem } = await branches(args.query, mode, f)
+          // Within one session, semantic search must filter rather than only
+          // rank: cosine always returns top-k even for an irrelevant query, and
+          // unlike corpus search there is no cross-session competition to bury
+          // weak hits. Explicit mode=semantic keeps the raw ranking.
+          if (mode === "hybrid")
+            sem = sem.filter((h) => SearchIndex.semanticScore(h) >= config.search.inspectSemMin)
+
+          const fused = fuse(
+            [
+              { hits: lex, which: "lex" as const },
+              { hits: sem, which: "sem" as const },
+            ],
+            (h) => h.message_id,
+            { rrfK: config.search.rrfK },
+          )
+          if (!fused.length) {
             const indexed = idxDb.query(`SELECT 1 FROM indexed_sessions WHERE session_id=?`).get(s.id)
             const hint = indexed
               ? "Likely not discussed in this session. Try different keywords, mode=semantic (unfiltered ranking), or omit query for a user-turn outline."
               : "This session is not indexed yet (the index lags a few minutes behind live sessions) — recall_expand reads it directly."
-            return `${header}\n\nNo matches for "${args.query}" (${mode}) in this session. ${hint}`
+            return `${head}\n\nNo matches for "${args.query}" (${mode}) in this session. ${hint}`
           }
-          const limit = Math.max(1, Math.min(args.limit ?? 12, 30))
-          const top = [...fused.values()].sort((a, b) => b.score - a.score).slice(0, limit)
-          top.sort((a, b) => a.hit.time - b.hit.time)
-          const lines = [header, `${top.length} of ${fused.size} matches for "${args.query}" (${mode}) — chronological:`, ""]
+
+          const top = fused.slice(0, clampInt(args.limit, 1, 30, 12))
+          top.sort((a, b) => a.hits[0].time - b.hits[0].time)
+          const snippets = searcher.snippets(
+            top.map((g) => g.hits[0]),
+            args.query,
+          )
+          const lines = [
+            head,
+            `${top.length} of ${fused.length} matches for "${args.query}" (${mode}) — chronological:`,
+            "",
+          ]
           top.forEach((g, i) => {
-            lines.push(`${i + 1}. ${fmtDateTime(g.hit.time)} (${g.hit.message_id})`, `   [${g.hit.via}] ${g.hit.snippet}`)
+            const h = g.hits[0]
+            lines.push(`${i + 1}. ${fmtDateTime(h.time)} (${h.message_id})`, `   [${h.via}] ${snippets.get(h) ?? ""}`)
           })
           lines.push(
             "",
@@ -1184,15 +479,14 @@ export const RecallPlugin: Plugin = async (input) => {
       }),
 
       recall_summarize: tool({
-        description:
-          "ESCALATION rung — summarize entire past OpenCode sessions (or answer a focused question about them) by offloading to a worker model (GLM-5.2 via OpenCode Go). Each fresh summary takes 10-30s, so try the instant local tools first: recall_inspect to search within the session, recall_expand to read around a hit. Reach for this when inspection can't answer cleanly, the session is too large to page, or you genuinely need the whole-session story (results are cached, so repeats are instant). Batch multiple sessions in one call via session_ids — they run concurrently.",
+        description: `ESCALATION rung — summarize entire past OpenCode sessions (or answer a focused question about them) by offloading to a cheap worker model. Each fresh summary takes 10-30s, so try the instant local tools first: recall_inspect to search within the session, recall_expand to read around a hit. Reach for this when inspection can't answer cleanly, the session is too large to page, or you genuinely need the whole-session story (results are cached, so repeats are instant). Batch multiple sessions in one call via session_ids — they run concurrently.`,
         args: {
           session_id: tool.schema.string().optional().describe("Session id (ses_...) or slug from recall_search"),
           session_ids: tool.schema
             .string()
             .array()
             .optional()
-            .describe(`Batch: several session ids/slugs summarized concurrently in one call (max ${SUMMARY_BATCH_MAX})`),
+            .describe(`Batch: several session ids/slugs summarized concurrently in one call (max ${config.summary.batchMax})`),
           focus: tool.schema
             .string()
             .optional()
@@ -1202,39 +496,35 @@ export const RecallPlugin: Plugin = async (input) => {
           refresh: tool.schema.boolean().optional().describe("Bypass the cache and re-summarize (default false)"),
         },
         async execute(args, ctx) {
-          if (!client?.session)
-            return "recall_summarize is unavailable: no opencode server client in this context."
+          if (!summarizer.available)
+            return config.summary.enabled
+              ? "recall_summarize is unavailable: no opencode server client in this context."
+              : "recall_summarize is disabled in your recall config (summary.enabled = false)."
           const ids = [...new Set([...(args.session_id ? [args.session_id] : []), ...(args.session_ids ?? [])])]
           if (!ids.length) return "Provide session_id or session_ids."
-          if (ids.length > SUMMARY_BATCH_MAX)
-            return `Too many sessions (${ids.length}); max ${SUMMARY_BATCH_MAX} per call. Split into batches.`
+          if (ids.length > config.summary.batchMax)
+            return `Too many sessions (${ids.length}); max ${config.summary.batchMax} per call. Split into batches.`
           const focus = (args.focus ?? "").trim()
           let done = 0
 
           const renderBlock = async (idOrSlug: string): Promise<string> => {
             try {
-              const candidates = findSession(idOrSlug)
-              const s = candidates[0]
-              if (!s) return `# ${idOrSlug}\nNo session found.`
-              const ambiguous =
-                s.id !== idOrSlug && candidates.length > 1
-                  ? `NOTE: ${candidates.length}+ sessions share slug '${idOrSlug}'; summarizing the most recent (${s.id}).\n`
-                  : ""
-              const header =
-                ambiguous +
-                `# ${s.title}\nsession_id=${s.id} slug=${s.slug} · ${shortDir(s.directory)} · ${fmtDate(s.time_created)} → ${fmtDate(s.time_updated)}`
-              const r = await summarizeSession(s, focus, args.refresh === true, ctx?.abort)
+              const found = resolve(idOrSlug, "summarizing")
+              if (!found) return `# ${idOrSlug}\nNo session found.`
+              const { s, note } = found
+              const r = await summarizer.summarize(s, focus, args.refresh === true, ctx?.abort)
+              const suffix = focus ? ` · focus: ${focus}` : ""
               const status = r.cachedAt
-                ? `(cached ${fmtDateTime(r.cachedAt)} · ${summaryModelTag}${focus ? ` · focus: ${focus}` : ""})`
-                : `(fresh · ${summaryModelTag}${r.messages ? ` · ${r.messages} messages` : ""}${r.secs ? ` · ${r.secs.toFixed(1)}s` : ""}${focus ? ` · focus: ${focus}` : ""})`
-              return `${header}\n${status}\n\n${r.summary}`
+                ? `(cached ${fmtDateTime(r.cachedAt)} · ${summarizer.modelTag}${suffix})`
+                : `(fresh · ${summarizer.modelTag}${r.messages ? ` · ${r.messages} messages` : ""}${r.secs ? ` · ${r.secs.toFixed(1)}s` : ""}${suffix})`
+              return `${header(s, note)}\n${status}\n\n${r.summary}`
             } catch (e) {
               log("summarize failed", idOrSlug, e)
               return `# ${idOrSlug}\nSummarization failed: ${e instanceof Error ? e.message : String(e)}`
             }
           }
 
-          const blocks = await pool(ids, SUMMARY_CONCURRENCY, async (idOrSlug) => {
+          const blocks = await pool(ids, config.summary.concurrency, async (idOrSlug) => {
             const block = await renderBlock(idOrSlug)
             done++
             if (ids.length > 1) ctx?.metadata?.({ title: `recall summarize: ${done}/${ids.length}` })
@@ -1242,7 +532,7 @@ export const RecallPlugin: Plugin = async (input) => {
           })
 
           if (blocks.length === 1) {
-            const title = findSession(ids[0])[0]?.title ?? ids[0]
+            const title = source.findSession(ids[0])[0]?.title ?? ids[0]
             return { title: `recall summary: ${title}`, output: blocks[0] }
           }
           return { title: `recall summaries: ${blocks.length} sessions`, output: blocks.join("\n\n---\n\n") }
@@ -1254,20 +544,28 @@ export const RecallPlugin: Plugin = async (input) => {
           "Show the recall conversation-index status: sessions/chunks indexed, backfill progress, embedding model state, and storage size. Use to check indexing health or explain missing recall_search results.",
         args: {},
         async execute() {
-          const counts = indexCounts()
-          let size = 0
-          try {
-            size = fs.statSync(path.join(DATA_DIR, "index.db")).size
-          } catch {}
+          const c = counts()
+          const st = indexer.state
+          const backfill = st.running
+            ? `running ${st.done}/${st.total}`
+            : st.skippedLocked
+              ? "held by another opencode process"
+              : st.lastRun
+                ? `idle (last run ${fmtDateTime(st.lastRun)})`
+                : "not yet run"
           const lines = [
-            `sessions indexed: ${counts.indexed}/${counts.total}`,
-            `embedded chunks: ${counts.chunks}`,
-            `fts rows: ${(idxDb.query(`SELECT count(*) c FROM parts_indexed`).get() as { c: number }).c}`,
-            `backfill: ${backfillState.running ? `running ${backfillState.done}/${backfillState.total}` : backfillState.lastRun ? `idle (last run ${fmtDateTime(backfillState.lastRun)})` : "not yet run"}`,
-            backfillState.lastError ? `last error: ${clean(backfillState.lastError, 200)}` : "",
-            `model: ${MODEL} (${DIMS}d, q8) — ${embedderP ? "loaded" : "not loaded"}`,
-            `summaries cached: ${(idxDb.query(`SELECT count(*) c FROM summaries`).get() as { c: number }).c} (${SUMMARY_MODEL.providerID}/${SUMMARY_MODEL.modelID})`,
-            `index size: ${(size / 1024 / 1024).toFixed(1)} MB at ${shortDir(DATA_DIR)}`,
+            `sessions indexed: ${c.indexed}/${c.total}`,
+            `embedded chunks: ${c.chunks}`,
+            `fts rows: ${c.ftsRows}`,
+            `backfill: ${backfill}`,
+            st.lastError ? `last error: ${clean(st.lastError, 200)}` : "",
+            `model: ${config.embed.model} (${config.embed.dims}d, q8) — ${embedder.loaded() ? "loaded" : "not loaded"}`,
+            config.summary.enabled
+              ? `summaries cached: ${summarizer.cachedCount()} (${summarizer.modelTag})`
+              : "summarizer: disabled",
+            `index size: ${(fileSize(indexPath) / 1024 / 1024).toFixed(1)} MB at ${sh(config.dataDir)}`,
+            `config: ${configSource === "defaults" ? "defaults" : sh(configSource)}`,
+            migration.reset ? `index was reset this session: ${migration.reason}` : "",
             `process RSS: ${Math.round(process.memoryUsage.rss() / 1024 / 1024)} MB`,
           ].filter(Boolean)
           return { title: "recall status", output: lines.join("\n") }
