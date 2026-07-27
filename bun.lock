@@ -8,12 +8,8 @@
         "@huggingface/transformers": "^3.7.0",
         "@opencode-ai/plugin": "^1.17.13",
       },
-    },
-    "plugins/brrr": {
-      "name": "oc-plugin-brrr",
-      "version": "0.1.0",
-      "peerDependencies": {
-        "@opencode-ai/plugin": "*",
+      "devDependencies": {
+        "@types/bun": "^1.3.14",
       },
     },
     "plugins/caffeinate": {
@@ -47,6 +43,13 @@
         "@opencode-ai/plugin": "*",
       },
     },
+    "plugins/hark": {
+      "name": "oc-plugin-hark",
+      "version": "0.1.0",
+      "peerDependencies": {
+        "@opencode-ai/plugin": "*",
+      },
+    },
     "plugins/local-session-commands": {
       "name": "oc-plugin-local-session-commands",
       "version": "0.1.0",
@@ -57,6 +60,13 @@
     },
     "plugins/mcp-lazy": {
       "name": "oc-plugin-mcp-lazy",
+      "version": "0.1.0",
+      "peerDependencies": {
+        "@opencode-ai/plugin": "*",
+      },
+    },
+    "plugins/message-timestamps": {
+      "name": "oc-plugin-message-timestamps",
       "version": "0.1.0",
       "peerDependencies": {
         "@opencode-ai/plugin": "*",
@@ -89,9 +99,16 @@
         "solid-js": "*",
       },
     },
+    "plugins/subagent-model": {
+      "name": "oc-plugin-subagent-model",
+      "version": "0.1.0",
+      "peerDependencies": {
+        "@opencode-ai/plugin": "*",
+      },
+    },
     "plugins/tokens-per-sec": {
       "name": "oc-plugin-tokens-per-sec",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "peerDependencies": {
         "@opencode-ai/plugin": "*",
         "@opentui/core": "*",
@@ -290,6 +307,8 @@
 
     "@standard-schema/spec": ["@standard-schema/spec@1.1.0", "", {}, "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="],
 
+    "@types/bun": ["@types/bun@1.3.14", "", { "dependencies": { "bun-types": "1.3.14" } }, "sha512-h1hFqFVcvAvD9j9K7ZW7vd82aSA+rTdznZa+5bwvCwqSB1jmmfLcbIWhOLx1/+boy/xmjgCs/OMUL8hRJSmnPw=="],
+
     "@types/node": ["@types/node@26.1.0", "", { "dependencies": { "undici-types": "~8.3.0" } }, "sha512-O0A1G3xPGy4w7AgQdAQYUlQ+BKk2Oovw8eRpofyp5KdBZULnbe+WqaOVNrm705SHphCiG4XHsACrSmPu1f+Kgw=="],
 
     "ansi-regex": ["ansi-regex@6.2.2", "", {}, "sha512-Bq3SmSpyFHaWjPk8If9yc6svM8c56dB5BAtW4Qbw5jHTwwXXcTLoRMkpDJp6VL0XzlWaCHTXrkFURMYmD0sLqg=="],
@@ -311,6 +330,8 @@
     "browserslist": ["browserslist@4.28.4", "", { "dependencies": { "baseline-browser-mapping": "^2.10.38", "caniuse-lite": "^1.0.30001799", "electron-to-chromium": "^1.5.376", "node-releases": "^2.0.48", "update-browserslist-db": "^1.2.3" }, "bin": { "browserslist": "cli.js" } }, "sha512-MTc8i/x9jBQd1iMw2CFGS+rwMa07eYjLR0CCTLDACl9xhxy+nIs3KeML/biicXtk9JrZ6dnnTatmc7ErPXIxqw=="],
 
     "bun-ffi-structs": ["bun-ffi-structs@0.2.4", "", { "peerDependencies": { "typescript": "^5" } }, "sha512-AJzsqoVFs1KBbJbWHIYrVZLDC3NhTqqh25awRXqzoLzmBAKr5oqk6+CwuYHAekKx+VBCYVohBoKuRq40dV+TYg=="],
+
+    "bun-types": ["bun-types@1.3.14", "", { "dependencies": { "@types/node": "*" } }, "sha512-4N0ig0fEomHt5R0KCFWjovxow98rIoRwKolrYdCcknNwMekCXRnWEUvgu5soYV8QXtVsrUD8B95MBOZGPvr6KQ=="],
 
     "caniuse-lite": ["caniuse-lite@1.0.30001800", "", {}, "sha512-MMHtuAz9Ys840zAY5F4k6fV5GaivZ9sPk+nz0mY+GYVzRBnYkN0mpqkSR92oWRQ19yQWo4HvBV/FnC16AJX8MA=="],
 
@@ -434,8 +455,6 @@
 
     "object-keys": ["object-keys@1.1.1", "", {}, "sha512-NuAESUOUMrlIXOfHKzD6bpPu3tYt3xvjNdRIQ+FeT0lNb4K8WR70CaDxhuNguS2XG+GjkyMwOzsN5ZktImfhLA=="],
 
-    "oc-plugin-brrr": ["oc-plugin-brrr@workspace:plugins/brrr"],
-
     "oc-plugin-caffeinate": ["oc-plugin-caffeinate@workspace:plugins/caffeinate"],
 
     "oc-plugin-current-session-id": ["oc-plugin-current-session-id@workspace:plugins/current-session-id"],
@@ -444,15 +463,21 @@
 
     "oc-plugin-ghostty-progress": ["oc-plugin-ghostty-progress@workspace:plugins/ghostty-progress"],
 
+    "oc-plugin-hark": ["oc-plugin-hark@workspace:plugins/hark"],
+
     "oc-plugin-local-session-commands": ["oc-plugin-local-session-commands@workspace:plugins/local-session-commands"],
 
     "oc-plugin-mcp-lazy": ["oc-plugin-mcp-lazy@workspace:plugins/mcp-lazy"],
+
+    "oc-plugin-message-timestamps": ["oc-plugin-message-timestamps@workspace:plugins/message-timestamps"],
 
     "oc-plugin-recall": ["oc-plugin-recall@workspace:plugins/recall"],
 
     "oc-plugin-sensitive-file-guard": ["oc-plugin-sensitive-file-guard@workspace:plugins/sensitive-file-guard"],
 
     "oc-plugin-session-id-badge": ["oc-plugin-session-id-badge@workspace:plugins/session-id-badge"],
+
+    "oc-plugin-subagent-model": ["oc-plugin-subagent-model@workspace:plugins/subagent-model"],
 
     "oc-plugin-tokens-per-sec": ["oc-plugin-tokens-per-sec@workspace:plugins/tokens-per-sec"],
 
