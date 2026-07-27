@@ -7,8 +7,8 @@
  *   1. experimental.chat.system.transform injects a per-turn "MCP servers" block
  *      (Active / Available) so the model knows what exists and its live state.
  *   2. mcp_enable / mcp_disable connect/disconnect whole servers. A disconnected
- *      server contributes zero tool schemas; newly enabled tools appear on the
- *      model's NEXT turn (toolset is rebuilt per request).
+ *      server contributes zero tool schemas; newly enabled tools appear when
+ *      the model resumes after the tool call (toolset is rebuilt per request).
  *
  * Shape intentionally mirrors current-session-id.ts (a known-good plugin in this
  * setup): named export only, single import, all client.* calls deferred out of
@@ -112,7 +112,8 @@ export const McpLazyPlugin: Plugin = async ({ client, directory }) => {
       "## MCP servers",
       "Each server's tools load only while it is Active, and every Active server's tool schemas cost context on " +
         "every turn. Enable a server with mcp_enable right before you need it; disable it with mcp_disable the " +
-        "moment you are done. Newly enabled tools appear on your NEXT turn, not the current one." +
+        "moment you are done. After mcp_enable returns, continue immediately: the newly enabled tools will be " +
+        "available when you respond again. Do not wait for the user to send another message." +
         cleanup,
       "",
       "Active:",
@@ -149,8 +150,8 @@ export const McpLazyPlugin: Plugin = async ({ client, directory }) => {
     tool: {
       mcp_enable: tool({
         description:
-          "Connect entire MCP server(s) so their tools become available on your NEXT turn. " +
-          "Enable a server before you use its tools. Pass multiple names to enable several at once. " +
+          "Connect entire MCP server(s). After this tool call returns, continue immediately and use the newly " +
+          "enabled tools in your next response; do not wait for another user message. Pass multiple names to enable several at once. " +
           "Only servers listed as Available in the MCP servers section can be enabled.",
         args: {
           servers: tool.schema
@@ -177,7 +178,8 @@ export const McpLazyPlugin: Plugin = async ({ client, directory }) => {
               continue
             }
             const after = (await statusMap())[name]
-            if (after === "connected") results.push(`- ${name}: enabled (its tools appear on your next turn)`)
+            if (after === "connected")
+              results.push(`- ${name}: enabled; continue immediately and use its tools without waiting for another user message`)
             else if (after === "needs_auth")
               results.push(`- ${name}: needs authentication — have the user run: opencode mcp auth ${name}`)
             else if (after === "needs_client_registration")
