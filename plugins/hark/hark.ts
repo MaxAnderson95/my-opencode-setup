@@ -1,9 +1,12 @@
 import type { Plugin } from "@opencode-ai/plugin"
+import { presence } from "../presence/presence.ts"
 
 const endpoint = process.env.HARK_WEBHOOK_URL
 const idleDelay = 1000
 const minBusyMs = 300_000
 const home = process.env.HOME
+// Escape hatch for testing the notification path while sitting at the machine.
+const alwaysNotify = process.env.HARK_ALWAYS_NOTIFY === "1"
 // Hark rejects a body over 2,000 chars or a title over 80 with a 400.
 const maxBody = 2000
 const maxTitle = 80
@@ -73,8 +76,19 @@ export default (async ({ client, directory }) => {
     return trimmed.length <= max ? trimmed : trimmed.slice(0, max - 1) + "…"
   }
 
+  // A push is pointless when the notification would land on a phone in his
+  // pocket while he is reading the same message on screen. Presence failing is
+  // treated as "away", because a wasted push beats silence.
+  const away = async () => {
+    if (alwaysNotify) return true
+    return presence()
+      .then((state) => !state.atComputer)
+      .catch(() => true)
+  }
+
   // Hark has no subtitle field, so the project rides along in the sender title.
   const send = async (title: string, body: string) => {
+    if (!(await away())) return
     await fetch(endpoint, {
       method: "POST",
       headers: {

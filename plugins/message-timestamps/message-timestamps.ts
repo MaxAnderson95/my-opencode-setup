@@ -2,9 +2,9 @@ import type { Plugin } from "@opencode-ai/plugin"
 
 // Gives the model a clock. Two surfaces:
 //
-//   1. Every user message is stamped with the wall-clock time it was sent, plus
-//      an idle-gap marker and the previous turn's duration when either is large
-//      enough to matter.
+//   1. Every user message is stamped with the wall-clock time it was sent. An
+//      idle-gap marker and the previous turn's duration are added as visible
+//      context when either is large enough to matter.
 //   2. Tool results are stamped selectively, so that a long agentic turn keeps
 //      reporting the time instead of leaving the model stuck on the reading it
 //      got when the turn started.
@@ -147,7 +147,8 @@ export const MessageTimestampsPlugin: Plugin = async ({ client }) => {
       if (output.parts.some((part) => part.type === "text" && part.text.startsWith("<time>"))) return
 
       const created = output.message.time.created
-      const lines = [`<time>${formatLocal(new Date(created))}</time>`]
+      const stamp = `<time>${formatLocal(new Date(created))}</time>`
+      let gap: string | undefined
       lastReading.set(output.message.sessionID, created)
 
       try {
@@ -155,14 +156,14 @@ export const MessageTimestampsPlugin: Plugin = async ({ client }) => {
         if (active !== undefined) {
           const notes: string[] = []
           const idleMs = created - active
-          if (idleMs >= gapThresholdMs) notes.push(`${formatDuration(idleMs)} since the previous message`)
+          if (idleMs >= gapThresholdMs) notes.push(`Session resumed after ${formatDuration(idleMs)}`)
 
           const turnStart = turnStarts.get(output.message.sessionID)
           const turnMs = turnStart === undefined ? undefined : active - turnStart
           if (turnMs !== undefined && turnMs >= turnThresholdMs)
-            notes.push(`previous turn took ${formatDuration(turnMs)}`)
+            notes.push(`Previous turn took ${formatDuration(turnMs)}`)
 
-          if (notes.length > 0) lines.push(`<time-gap>${notes.join("; ")}</time-gap>`)
+          if (notes.length > 0) gap = notes.join(" · ")
         }
       } catch (error) {
         await log("warn", "failed to resolve previous message time", { error: String(error) })
@@ -174,9 +175,13 @@ export const MessageTimestampsPlugin: Plugin = async ({ client }) => {
         messageID: output.message.id,
         sessionID: output.message.sessionID,
         type: "text",
-        text: lines.join("\n"),
+        text: stamp,
         synthetic: true,
       })
+      if (gap) {
+        const prompt = output.parts.find((part) => part.type === "text" && !part.synthetic)
+        if (prompt?.type === "text") prompt.text = `${gap}\n\n${prompt.text}`
+      }
     },
 
     "tool.execute.before": async (input) => {
