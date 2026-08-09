@@ -37,6 +37,7 @@ Top-level-only applies to *discovery* of that entry file, not to what it may imp
 | [`mcp-lazy/`](plugins/mcp-lazy/README.md) | Model-controlled MCP server enable/disable so only in-use servers cost tool-schema context. Adds `mcp_enable` / `mcp_disable`. | — |
 | [`message-timestamps/`](plugins/message-timestamps/README.md) | Gives the model a clock: stamps every user message with local time (plus idle gap and previous-turn duration when they matter) and selectively stamps slow tool results, without breaking prompt caching. | Optional `OPENCODE_MESSAGE_TIMESTAMP*` env overrides. |
 | [`recall/`](plugins/recall/README.md) | Long-term conversational memory: hybrid lexical (FTS5/BM25) + semantic (local transformers.js embeddings) search over every past OpenCode conversation. An escalation ladder of tools: `recall_search` (find sessions) / `recall_inspect` (search within one, or outline it) / `recall_expand` (read transcript) / `recall_summarize` (delegate to a cheap worker model, cached permanently) / `recall_status`. Announces long background indexing via TUI toasts and stays silent for routine catch-up. The only multi-file plugin here (`lib/` + `bun test`). | One-time ~33 MB model download; reads the OpenCode DB read-only. Optional `~/.config/opencode/recall.json`. |
+| [`search-scope-guard/`](plugins/search-scope-guard/README.md) | Blocks `glob` and `grep` searches rooted at the home directory, its ancestors, or macOS `~/Library` before they can stall a session. | — |
 | [`sensitive-file-guard/`](plugins/sensitive-file-guard/README.md) | Blocks LLM reads, edits, and copy-into-bash of `.env`, private keys, kubeconfigs, etc. Adds `list_env_keys` (keys only, never values) and `set_env_value` (writes one assignment, returns no values). | Optional `protected` / `blockCopy` config. |
 | `subagent-model/` | Run a subagent on a specific provider **and** model, with an optional reasoning `variant`. Adds `task_with_model` / `list_subagent_models` (with per-provider pricing, since one model is often sold by several providers at different rates). | — |
 | `tool-timing/` | Appends wall-clock duration to every tool call's title (works for native and MCP tools). | — |
@@ -47,6 +48,7 @@ These use the [`@opentui/solid`](https://github.com/sst/opencode) JSX runtime an
 
 | Plugin | Description | Requires |
 |---|---|---|
+| `cache-stats/` | Provider-neutral prompt-cache statistics for the latest call and current session. Uses OpenCode's normalized cache read/write tokens, covering OpenAI, Anthropic, Google, Bedrock, and compatible providers. | — |
 | `elapsed-timer/` | Running session duration in the TUI sidebar. | — |
 | `local-session-commands/` | Handles `/open [path]` and `/delete` directly in the TUI (no LLM round-trip). | **macOS** for `/open` (`open`) |
 | `session-id-badge/` | Current session ID in the TUI sidebar. | — |
@@ -63,6 +65,7 @@ Instruction sets the agent loads on demand. `link.sh` symlinks each `skills/<nam
 | `md2pdf/` | Format/style Markdown for the `md2pdf` CLI (Markdown → HTML → headless Chrome → PDF). | `md2pdf` CLI + Chrome |
 | `pdf-reports/` | Author PDF reports by writing Markdown and converting with `md2pdf`. | `md2pdf` CLI |
 | `openusage/` | Report AI-subscription usage/limits by reading the local OpenUsage menu-bar app's HTTP API. | **macOS** + the OpenUsage app |
+| `dark-mode/` | Build a dark/light/system theme system: CSS token structure, the pre-paint script that kills the flash, the three-state control, plus Astro and React wiring. | — |
 
 > `md2pdf` and `openusage` target specific local tools (a personal `md2pdf` CLI and the OpenUsage menu-bar app); they're only useful if you run those tools.
 
@@ -104,6 +107,7 @@ Then wire up the theme and TUI plugins in `tui.jsonc` (see [`tui.example.jsonc`]
 {
   "theme": "ayu-max-custom",
   "plugin": [
+    "file:///Users/you/.config/opencode/plugins/cache-stats",
     "file:///Users/you/.config/opencode/plugins/elapsed-timer",
     "file:///Users/you/.config/opencode/plugins/tokens-per-sec",
     "file:///Users/you/.config/opencode/plugins/session-id-badge",
