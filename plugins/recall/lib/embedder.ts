@@ -1,15 +1,29 @@
 /**
- * Lazily loaded sentence embedder backed by in-process transformers.js.
+ * Lazily loaded sentence embedder backed by transformers.js in a child process.
  *
- * The ONNX session costs roughly 300 MB resident, so it is loaded on first use
- * and released after an idle period rather than held for the life of the
- * process.
+ * OpenCode runs server plugins in a Bun worker and terminates that worker at
+ * shutdown. Loading onnxruntime-node there makes Bun tear down NAPI on worker
+ * termination, which can hard-crash the entire OpenCode process. Keeping the
+ * native addon in a child confines that failure boundary and lets us reclaim
+ * its roughly 300 MB RSS without touching the host's NAPI environment.
  */
 import fs from "node:fs"
 import path from "node:path"
+import { fileURLToPath } from "node:url"
 import { noopNotify, type Notify } from "./notify.ts"
 
 export type Vectors = Float32Array[]
+
+export type EmbedWorkerRequest = {
+  type: "embed"
+  id: number
+  options: { model: string; dims: number; batch: number; cacheDir: string }
+  texts: string[]
+}
+
+export type EmbedWorkerResponse =
+  | { type: "result"; id: number; vectors: Vectors; loadMs?: number }
+  | { type: "error"; id: number; error: string }
 
 export interface Embedder {
   embed(texts: string[]): Promise<Vectors>
@@ -29,99 +43,153 @@ export type EmbedderOpts = {
 }
 
 export function createEmbedder(opts: EmbedderOpts): Embedder {
-  type Loaded = { embed(texts: string[]): Promise<Vectors>; release(): Promise<void> }
-  let loading: Promise<Loaded> | null = null
-  let lastUse = 0
+  type WorkerProcess = Bun.Subprocess<"ignore", "ignore", "pipe">
+  type Pending = { resolve: (vectors: Vectors) => void; reject: (error: Error) => void }
 
-  const load = (): Promise<Loaded> => {
-    lastUse = Date.now()
-    if (loading) return loading
-    const p = (async (): Promise<Loaded> => {
-      // Dynamic import: Bun caches failed static import resolution for the life
-      // of the process, so a missing dependency here would permanently poison
-      // module load for the whole plugin rather than just disabling search.
-      const { pipeline, env } = await import("@huggingface/transformers")
-      const models = path.join(opts.cacheDir, "models")
-      env.cacheDir = models
-      // The first load fetches ~33 MB from the Hugging Face hub with no other
-      // visible sign, which reads as a hang on a slow connection.
-      const cached = fs.existsSync(path.join(models, opts.model))
-      if (!cached)
-        (opts.notify ?? noopNotify)({
-          message: `Downloading the embedding model (${opts.model}, ~33 MB). One time only; semantic search is unavailable until it lands.`,
-          variant: "info",
-        })
-      const t0 = performance.now()
-      const pipe = await pipeline("feature-extraction", opts.model, { dtype: "q8" })
-      opts.log(`embedder loaded in ${Math.round(performance.now() - t0)}ms`)
-      if (!cached)
-        (opts.notify ?? noopNotify)({ message: "Embedding model ready — semantic search is live.", variant: "success" })
-      return {
-        async embed(texts: string[]): Promise<Vectors> {
-          lastUse = Date.now()
-          const out: Vectors = []
-          for (let i = 0; i < texts.length; i += opts.batch) {
-            const batch = texts.slice(i, i + opts.batch)
-            const tensor = await pipe(batch, { pooling: "mean", normalize: true })
-            const data = tensor.data as Float32Array
-            for (let j = 0; j < batch.length; j++) out.push(data.slice(j * opts.dims, (j + 1) * opts.dims))
-            tensor.dispose?.()
-            lastUse = Date.now()
-          }
-          return out
-        },
-        release: async () => {
-          await pipe.dispose?.()
-        },
-      }
-    })()
-    loading = p
-    p.catch((e) => {
-      opts.log("embedder load failed", e)
-      if (loading === p) loading = null // allow a retry on next use
-    })
-    return p
+  let worker: WorkerProcess | null = null
+  let ready = false
+  let nextId = 1
+  let idleTimer: ReturnType<typeof setTimeout> | null = null
+  let serial: Promise<unknown> = Promise.resolve()
+  let downloadNotice = false
+  let closed = false
+  const pending = new Map<number, Pending>()
+  const intentional = new WeakSet<WorkerProcess>()
+  const notify = opts.notify ?? noopNotify
+
+  const clearIdle = () => {
+    if (idleTimer) clearTimeout(idleTimer)
+    idleTimer = null
   }
 
-  const reaper = setInterval(() => {
-    if (!loading || Date.now() - lastUse < opts.idleMs) return
-    const p = loading
-    loading = null
-    p.then((e) => e.release()).catch(() => {})
-    opts.log("embedder disposed after idle")
-  }, 60_000)
-  reaper.unref?.()
+  const failPending = (error: Error) => {
+    for (const request of pending.values()) request.reject(error)
+    pending.clear()
+  }
+
+  const stop = (permanent = false) => {
+    if (permanent) closed = true
+    clearIdle()
+    const proc = worker
+    worker = null
+    ready = false
+    if (!proc) return null
+    intentional.add(proc)
+    failPending(new Error("embedder worker stopped"))
+    try {
+      // onnxruntime-node can panic during Bun teardown even in the child. SIGKILL
+      // skips runtime teardown entirely; the OS safely reclaims the native state.
+      proc.kill("SIGKILL")
+    } catch {}
+    return proc
+  }
+
+  const scheduleIdle = () => {
+    clearIdle()
+    if (opts.idleMs <= 0 || !worker) return
+    idleTimer = setTimeout(stop, opts.idleMs)
+    idleTimer.unref?.()
+  }
+
+  const onMessage = (message: EmbedWorkerResponse) => {
+    if (!message || (message.type !== "result" && message.type !== "error")) return
+    const request = pending.get(message.id)
+    if (!request) return
+    pending.delete(message.id)
+    if (message.type === "error") {
+      request.reject(new Error(message.error))
+    } else {
+      ready = true
+      if (message.loadMs !== undefined) opts.log(`embedder worker loaded in ${Math.round(message.loadMs)}ms`)
+      if (downloadNotice) {
+        downloadNotice = false
+        notify({ message: "Embedding model ready — semantic search is live.", variant: "success" })
+      }
+      request.resolve(message.vectors)
+    }
+    scheduleIdle()
+  }
+
+  const start = (): WorkerProcess => {
+    if (worker && !worker.killed) return worker
+    clearIdle()
+    ready = false
+    const models = path.join(opts.cacheDir, "models")
+    downloadNotice = !fs.existsSync(path.join(models, opts.model))
+    if (downloadNotice)
+      notify({
+        message: `Downloading the embedding model (${opts.model}, ~33 MB). One time only; semantic search is unavailable until it lands.`,
+        variant: "info",
+      })
+
+    const proc = Bun.spawn({
+      cmd: [process.execPath, fileURLToPath(new URL("./embedder-worker.ts", import.meta.url))],
+      env: { ...process.env, BUN_BE_BUN: "1" },
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "pipe",
+      ipc: onMessage,
+      onExit(exited, code, signal, error) {
+        const wasCurrent = worker === exited
+        if (wasCurrent) {
+          worker = null
+          ready = false
+          clearIdle()
+          failPending(new Error(`embedder worker exited (code=${code}, signal=${signal})`))
+        }
+        if (!intentional.has(exited)) opts.log("embedder worker exited unexpectedly", { code, signal, error })
+      },
+    })
+    worker = proc
+    proc.unref()
+    void new Response(proc.stderr)
+      .text()
+      .then((text) => {
+        if (text.trim()) opts.log("embedder worker stderr", text.trim())
+      })
+      .catch(() => {})
+    if (proc.exitCode !== null) worker = null
+    return proc
+  }
+
+  const request = (texts: string[]): Promise<Vectors> => {
+    if (closed) return Promise.reject(new Error("embedder is shut down"))
+    clearIdle()
+    const proc = start()
+    const id = nextId++
+    return new Promise<Vectors>((resolve, reject) => {
+      pending.set(id, { resolve, reject })
+      try {
+        proc.send({
+          type: "embed",
+          id,
+          options: { model: opts.model, dims: opts.dims, batch: opts.batch, cacheDir: opts.cacheDir },
+          texts,
+        } satisfies EmbedWorkerRequest)
+      } catch (error) {
+        pending.delete(id)
+        reject(error instanceof Error ? error : new Error(String(error)))
+      }
+    })
+  }
 
   return {
-    async embed(texts) {
-      if (!texts.length) return []
-      return (await load()).embed(texts)
+    embed(texts) {
+      if (!texts.length) return Promise.resolve([])
+      const result = serial.then(() => request(texts))
+      serial = result.then(
+        () => undefined,
+        () => undefined,
+      )
+      return result
     },
-    loaded: () => loading !== null,
+    loaded: () => ready,
     async dispose() {
-      const p = loading
-      loading = null
-      if (p) await p.then((e) => e.release()).catch(() => {})
+      const proc = stop(true)
+      if (proc) await Promise.race([proc.exited, Bun.sleep(1_000)])
     },
     shutdown() {
-      clearInterval(reaper)
-      // Deliberately do NOT release the ONNX session here. shutdown() runs as
-      // the process is exiting, and onnxruntime-node's teardown calls back into
-      // a half-dead NAPI env; when it tries to raise an error there,
-      // napi_create_error fails and Bun hard-panics ("NAPI FATAL ERROR:
-      // Error::New napi_create_error"). The OS reclaims the session on exit
-      // regardless, and the idle reaper still releases it mid-process where
-      // NAPI is healthy.
-      //
-      // Caveats, if this needs revisiting:
-      // - This is a workaround, not a fix. The underlying bug is
-      //   onnxruntime-node raising a NAPI error during env teardown; it belongs
-      //   upstream in Bun / onnxruntime-node, not here.
-      // - A narrow race remains: if the reaper's 60s tick releases at the same
-      //   moment the process exits, the panic can still happen. If it recurs,
-      //   the durable fix is to move embedding into a subprocess so the NAPI
-      //   addon never shares a VM with the TUI lifecycle.
-      loading = null
+      stop(true)
     },
   }
 }

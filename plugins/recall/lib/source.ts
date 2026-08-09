@@ -77,10 +77,11 @@ export class Source {
       .all(idOrSlug, idOrSlug, idOrSlug) as SessionRow[]
   }
 
-  allSessions(): { id: string; t: number }[] {
-    return this.db.query(`SELECT id, time_updated t FROM session ORDER BY time_updated DESC`).all() as {
+  allSessions(): { id: string; t: number; directory: string }[] {
+    return this.db.query(`SELECT id, time_updated t, directory FROM session ORDER BY time_updated DESC`).all() as {
       id: string
       t: number
+      directory: string
     }[]
   }
 

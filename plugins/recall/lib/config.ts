@@ -12,6 +12,10 @@ export type SummaryModel = { providerID: string; modelID: string; variant?: stri
 export type Config = {
   dataDir: string
   sourceDb: string
+  index: {
+    /** Absolute or ~/ paths whose sessions must not be retained by recall. */
+    excludeDirectories: string[]
+  }
   embed: {
     model: string
     dims: number
@@ -68,6 +72,7 @@ function defaults(): Config {
   return {
     dataDir: path.join(os.homedir(), ".local", "share", "opencode-recall"),
     sourceDb: path.join(os.homedir(), ".local", "share", "opencode", "opencode.db"),
+    index: { excludeDirectories: [] },
     embed: {
       model: "Xenova/bge-small-en-v1.5",
       dims: 384,
@@ -120,7 +125,7 @@ export function parseModelSpec(spec: string): SummaryModel | null {
   return { providerID, modelID: rest.join("/") }
 }
 
-export type ConfigLoad = { config: Config; source: string; warnings: string[] }
+export type ConfigLoad = { config: Config; source: string; file: string; warnings: string[] }
 
 /**
  * Precedence: defaults < recall.json < environment.
@@ -164,18 +169,29 @@ export function loadConfig(
   if (env.RECALL_DISABLE_SUMMARIZE === "1") config.summary.enabled = false
   if (env.RECALL_QUIET === "1") config.notify.enabled = false
 
+  if (!Array.isArray(config.index.excludeDirectories)) {
+    warnings.push("ignoring index.excludeDirectories (expected an array of paths)")
+    config.index.excludeDirectories = []
+  } else {
+    const invalid = config.index.excludeDirectories.filter((v) => typeof v !== "string" || !v.trim()).length
+    if (invalid) warnings.push(`ignoring ${invalid} invalid index.excludeDirectories entries`)
+    config.index.excludeDirectories = config.index.excludeDirectories.filter(
+      (v): v is string => typeof v === "string" && !!v.trim(),
+    )
+  }
+
   if (config.chunk.overlap >= config.chunk.chars) {
     warnings.push(`chunk.overlap (${config.chunk.overlap}) >= chunk.chars (${config.chunk.chars}); clamping`)
     config.chunk.overlap = Math.floor(config.chunk.chars / 4)
   }
-  return { config, source, warnings }
+  return { config, source, file, warnings }
 }
 
 export function modelTag(c: Config): string {
   return `${c.embed.model}:${c.embed.dims}`
 }
 
-export function summaryModelTag(c: Config): string {
+export function summaryModelTag(c: { summary: { model: SummaryModel } }): string {
   const m = c.summary.model
   return `${m.providerID}/${m.modelID}${m.variant ? `/${m.variant}` : ""}`
 }

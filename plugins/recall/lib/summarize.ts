@@ -6,8 +6,9 @@
  * about, and are invalidated only by the source session changing.
  */
 import type { Database } from "bun:sqlite"
-import type { Config } from "./config.ts"
+import type { Config, SummaryModel } from "./config.ts"
 import { summaryModelTag } from "./config.ts"
+import type { DirectoryExclusions } from "./exclusions.ts"
 import type { Source, SessionRow } from "./source.ts"
 import { clean, fmtDate, middleOut, shortDir } from "./text.ts"
 
@@ -25,6 +26,7 @@ export type SummarizerDeps = {
   idx: Database
   source: Source
   config: Config
+  exclusions: DirectoryExclusions
   client: any
   home: string
   log: (...args: unknown[]) => void
@@ -64,12 +66,20 @@ export class Summarizer {
     }
   }
 
-  summarize(s: SessionRow, focus: string, refresh: boolean, abort?: AbortSignal): Promise<SummaryResult> {
-    const key = `${s.id}\u0000${focus}`
+  summarize(
+    s: SessionRow,
+    focus: string,
+    refresh: boolean,
+    abort?: AbortSignal,
+    model: SummaryModel = this.d.config.summary.model,
+  ): Promise<SummaryResult> {
+    if (this.d.exclusions.matches(s.directory)) return Promise.reject(new Error("session is excluded from recall"))
+    const modelTag = summaryModelTag({ summary: { model } })
+    const key = `${s.id}\u0000${modelTag}\u0000${focus}`
     if (!refresh) {
       const cached = this.d.idx
         .query(`SELECT time_updated, summary, created FROM summaries WHERE session_id=? AND model=? AND focus=?`)
-        .get(s.id, this.modelTag, focus) as
+        .get(s.id, modelTag, focus) as
         | { time_updated: number; summary: string; created: number }
         | null
       if (cached && cached.time_updated === s.time_updated)
@@ -77,7 +87,7 @@ export class Summarizer {
       const inflight = this.inFlight.get(key)
       if (inflight) return inflight
     }
-    const p = this.run(s, focus, abort)
+    const p = this.run(s, focus, modelTag, model, abort)
     this.inFlight.set(key, p)
     p.catch(() => {}).finally(() => {
       if (this.inFlight.get(key) === p) this.inFlight.delete(key)
@@ -85,7 +95,13 @@ export class Summarizer {
     return p
   }
 
-  private async run(s: SessionRow, focus: string, abort?: AbortSignal): Promise<SummaryResult> {
+  private async run(
+    s: SessionRow,
+    focus: string,
+    modelTag: string,
+    model: SummaryModel,
+    abort?: AbortSignal,
+  ): Promise<SummaryResult> {
     const cfg = this.d.config.summary
     const { text: transcript, messages } = this.transcript(s.id)
     if (!transcript) throw new Error("session has no transcript content")
@@ -104,7 +120,14 @@ export class Summarizer {
       const racers: Promise<any>[] = [
         this.d.client.session.prompt({
           path: { id: worker },
-          body: { agent: cfg.agent, system, tools: { "*": false }, parts: [{ type: "text", text: task }] },
+          body: {
+            agent: cfg.agent,
+            model: { providerID: model.providerID, modelID: model.modelID },
+            ...(model.variant ? { variant: model.variant } : {}),
+            system,
+            tools: { "*": false },
+            parts: [{ type: "text", text: task }],
+          },
         }),
         Bun.sleep(cfg.timeoutMs).then(() => {
           throw new Error(`summarizer timed out after ${cfg.timeoutMs / 1000}s`)
@@ -128,11 +151,12 @@ export class Summarizer {
         const err = res?.data?.info?.error
         throw new Error(err ? clean(JSON.stringify(err), 300) : "summarizer returned no text")
       }
+      if (this.d.exclusions.matches(s.directory)) throw new Error("session was excluded while summarization was running")
       this.d.idx.run(
         `INSERT INTO summaries(session_id,model,focus,time_updated,summary,created) VALUES (?,?,?,?,?,?)
          ON CONFLICT(session_id,model,focus) DO UPDATE SET time_updated=excluded.time_updated,
            summary=excluded.summary, created=excluded.created`,
-        [s.id, this.modelTag, focus, s.time_updated, summary, Date.now()],
+        [s.id, modelTag, focus, s.time_updated, summary, Date.now()],
       )
       return { summary, secs: (performance.now() - t0) / 1000, messages }
     } finally {
