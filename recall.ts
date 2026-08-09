@@ -19,8 +19,9 @@ import os from "node:os"
 import { Database } from "bun:sqlite"
 import { tool, type Plugin } from "@opencode-ai/plugin"
 
-import { loadConfig, modelTag } from "./lib/config.ts"
+import { loadConfig, modelTag, type SummaryModel } from "./lib/config.ts"
 import { createEmbedder } from "./lib/embedder.ts"
+import { DirectoryExclusions } from "./lib/exclusions.ts"
 import { Indexer } from "./lib/indexer.ts"
 import { createNotifier, noopNotify } from "./lib/notify.ts"
 import { BackfillLease, migrate, openIndex } from "./lib/schema.ts"
@@ -95,7 +96,7 @@ function disabledPlugin(reason: string, logPath: string) {
 export const RecallPlugin: Plugin = async (input) => {
   const client = (input as { client?: any } | undefined)?.client
   const home = os.homedir()
-  const { config, source: configSource, warnings } = loadConfig()
+  const { config, source: configSource, file: configFile, warnings } = loadConfig()
   const indexPath = path.join(config.dataDir, "index.db")
   const logPath = path.join(config.dataDir, "recall.log")
 
@@ -131,6 +132,7 @@ export const RecallPlugin: Plugin = async (input) => {
     })
 
   const source = new Source(srcDb)
+  const exclusions = new DirectoryExclusions(config.index.excludeDirectories, home)
   const embedder = createEmbedder({
     model: config.embed.model,
     dims: config.embed.dims,
@@ -145,6 +147,7 @@ export const RecallPlugin: Plugin = async (input) => {
     source,
     embedder,
     config,
+    exclusions,
     log,
     skipTools: OWN_TOOLS,
     workerPrefix: WORKER_PREFIX,
@@ -152,10 +155,49 @@ export const RecallPlugin: Plugin = async (input) => {
     afterReset: migration.reset,
   })
   const searcher = new SearchIndex(idxDb, source, embedder, config, log)
-  const summarizer = new Summarizer({ idx: idxDb, source, config, client, home, log })
+  const summarizer = new Summarizer({ idx: idxDb, source, config, exclusions, client, home, log })
+  const initiallyExcluded = indexer.reconcileExclusions()
+  if (initiallyExcluded) log(`excluded-directory reconciliation removed ${initiallyExcluded} sessions`)
 
-  // Fire-and-forget work is tracked so shutdown can drain rather than yank the
-  // ONNX session out from under an in-flight embed.
+  type CatalogModel = { id: string; variants?: Record<string, unknown> }
+  type CatalogProvider = { id: string; models: Record<string, CatalogModel> }
+
+  async function resolveSummaryModel(args: {
+    providerID?: string
+    modelID?: string
+    variant?: string
+  }): Promise<SummaryModel | string> {
+    const providerID = args.providerID?.trim() || config.summary.model.providerID
+    const modelID = args.modelID?.trim() || config.summary.model.modelID
+    const requestedVariant = args.variant?.trim() ||
+      (providerID === config.summary.model.providerID && modelID === config.summary.model.modelID
+        ? config.summary.model.variant
+        : undefined)
+    let providers: CatalogProvider[]
+    try {
+      const res = await client.config.providers({ query: { directory: input.directory } })
+      providers = (res.data?.providers as CatalogProvider[] | undefined) ?? []
+    } catch {
+      return "Could not load the configured provider/model catalog."
+    }
+    const provider = providers.find((p) => p.id === providerID)
+    if (!provider)
+      return `Unknown provider "${providerID}". Configured providers: ${providers.map((p) => p.id).join(", ") || "none"}.`
+    const model = provider.models[modelID]
+    if (!model) return `Provider "${providerID}" has no model "${modelID}". Call list_subagent_models to find valid pairs.`
+    let variant: string | undefined
+    if (requestedVariant && requestedVariant.toLowerCase() !== "default") {
+      variant = Object.keys(model.variants ?? {}).find((v) => v.toLowerCase() === requestedVariant.toLowerCase())
+      if (!variant) {
+        const available = Object.keys(model.variants ?? {})
+        return `Model "${providerID}/${modelID}" has no variant "${requestedVariant}". Available variants: ${available.join(", ") || "none"}.`
+      }
+    }
+    return { providerID, modelID, ...(variant ? { variant } : {}) }
+  }
+
+  // Fire-and-forget work is tracked so shutdown can drain rather than kill the
+  // isolated embedding process under an in-flight request.
   const pending = new Set<Promise<unknown>>()
   const track = (p: Promise<unknown>) => {
     pending.add(p)
@@ -171,18 +213,61 @@ export const RecallPlugin: Plugin = async (input) => {
   )
   startTimer.unref?.()
 
-  const counts = () => ({
-    chunks: (idxDb.query(`SELECT count(*) c FROM chunks`).get() as { c: number }).c,
-    ftsRows: (idxDb.query(`SELECT count(*) c FROM parts`).get() as { c: number }).c,
-    indexed: (idxDb.query(`SELECT count(*) c FROM indexed_sessions`).get() as { c: number }).c,
-    total: source.sessionCount(),
-  })
+  const configSignature = () => {
+    try {
+      const stat = fs.statSync(configFile)
+      return `${stat.mtimeMs}:${stat.size}`
+    } catch {
+      return "missing"
+    }
+  }
+  let lastConfigSignature = configSignature()
+  let lastExclusionConfig = JSON.stringify(config.index.excludeDirectories)
+  const configTimer = setInterval(() => {
+    const signature = configSignature()
+    if (signature === lastConfigSignature) return
+    lastConfigSignature = signature
+    const loaded = loadConfig()
+    const parseFailed = loaded.warnings.some((warning) => warning.startsWith(`ignoring ${configFile}:`))
+    const exclusionsInvalid = loaded.warnings.some((warning) =>
+      warning.startsWith("ignoring index.excludeDirectories ("),
+    )
+    if (parseFailed || exclusionsInvalid) {
+      for (const warning of loaded.warnings) log("config reload warning:", warning)
+      return
+    }
+    const next = JSON.stringify(loaded.config.index.excludeDirectories)
+    if (next === lastExclusionConfig) return
+    lastExclusionConfig = next
+    config.index.excludeDirectories = loaded.config.index.excludeDirectories
+    exclusions.update(config.index.excludeDirectories)
+    const purged = indexer.reconcileExclusions()
+    log(`exclusion config reloaded: ${exclusions.entries().length} roots, ${purged} sessions excluded`)
+    track(
+      (async () => {
+        while (indexer.state.running) await Bun.sleep(1_000)
+        await runBackfill()
+      })(),
+    )
+  }, 5_000)
+  configTimer.unref?.()
+
+  const counts = () => {
+    const sourceSessions = source.allSessions()
+    return {
+      chunks: (idxDb.query(`SELECT count(*) c FROM chunks`).get() as { c: number }).c,
+      ftsRows: (idxDb.query(`SELECT count(*) c FROM parts`).get() as { c: number }).c,
+      indexed: (idxDb.query(`SELECT count(*) c FROM indexed_sessions`).get() as { c: number }).c,
+      total: sourceSessions.filter((s) => !exclusions.matches(s.directory)).length,
+      excluded: sourceSessions.filter((s) => exclusions.matches(s.directory)).length,
+    }
+  }
 
   const sh = (dir: string) => shortDir(dir, home)
 
   /** Resolve a session id or slug, with a note when a slug was ambiguous. */
   function resolve(idOrSlug: string, verb: string): { s: SessionRow; note: string } | null {
-    const candidates = source.findSession(idOrSlug)
+    const candidates = source.findSession(idOrSlug).filter((s) => !exclusions.matches(s.directory))
     const s = candidates[0]
     if (!s) return null
     const note =
@@ -221,7 +306,6 @@ export const RecallPlugin: Plugin = async (input) => {
       cfg.agent ??= {}
       cfg.agent[config.summary.agent] = {
         model: `${config.summary.model.providerID}/${config.summary.model.modelID}`,
-        variant: config.summary.model.variant,
         mode: "subagent",
         hidden: true,
       }
@@ -230,6 +314,7 @@ export const RecallPlugin: Plugin = async (input) => {
     dispose: async () => {
       try {
         clearTimeout(startTimer)
+        clearInterval(configTimer)
         if (pending.size) await Promise.race([Promise.allSettled([...pending]), Bun.sleep(8_000)])
         embedder.shutdown()
         idxDb.close()
@@ -277,7 +362,7 @@ export const RecallPlugin: Plugin = async (input) => {
           const c = counts()
           if (!c.indexed) {
             track(runBackfill())
-            return `Index is empty — backfill just started (${c.total} sessions to index, ETA a few minutes). Retry shortly; recall_status shows progress.`
+            return `Index is empty — backfill just started (${c.total} eligible sessions to index, ETA a few minutes). Retry shortly; recall_status shows progress.`
           }
           const f: Filters = {
             since: parseWhen(args.since, 0),
@@ -479,7 +564,7 @@ export const RecallPlugin: Plugin = async (input) => {
       }),
 
       recall_summarize: tool({
-        description: `ESCALATION rung — summarize entire past OpenCode sessions (or answer a focused question about them) by offloading to a cheap worker model. Each fresh summary takes 10-30s, so try the instant local tools first: recall_inspect to search within the session, recall_expand to read around a hit. Reach for this when inspection can't answer cleanly, the session is too large to page, or you genuinely need the whole-session story (results are cached, so repeats are instant). Batch multiple sessions in one call via session_ids — they run concurrently.`,
+        description: `ESCALATION rung — summarize entire past OpenCode sessions (or answer a focused question about them) by offloading to a cheap worker model. Defaults to ${config.summary.model.providerID}/${config.summary.model.modelID} at ${config.summary.model.variant ?? "the provider default"} reasoning; providerID, modelID, and variant may override that per call. Each fresh summary takes 10-30s, so try the instant local tools first: recall_inspect to search within the session, recall_expand to read around a hit. Reach for this when inspection can't answer cleanly, the session is too large to page, or you genuinely need the whole-session story (results are cached, so repeats are instant). Batch multiple sessions in one call via session_ids — they run concurrently.`,
         args: {
           session_id: tool.schema.string().optional().describe("Session id (ses_...) or slug from recall_search"),
           session_ids: tool.schema
@@ -494,6 +579,18 @@ export const RecallPlugin: Plugin = async (input) => {
               "Optional question to answer from each session instead of a general summary, e.g. 'what did we decide about auth?'",
             ),
           refresh: tool.schema.boolean().optional().describe("Bypass the cache and re-summarize (default false)"),
+          providerID: tool.schema
+            .string()
+            .optional()
+            .describe(`Provider override (default ${config.summary.model.providerID})`),
+          modelID: tool.schema
+            .string()
+            .optional()
+            .describe(`Model override (default ${config.summary.model.modelID})`),
+          variant: tool.schema
+            .string()
+            .optional()
+            .describe(`Reasoning-effort variant override (default ${config.summary.model.variant ?? "provider default"})`),
         },
         async execute(args, ctx) {
           if (!summarizer.available)
@@ -504,6 +601,9 @@ export const RecallPlugin: Plugin = async (input) => {
           if (!ids.length) return "Provide session_id or session_ids."
           if (ids.length > config.summary.batchMax)
             return `Too many sessions (${ids.length}); max ${config.summary.batchMax} per call. Split into batches.`
+          const selectedModel = await resolveSummaryModel(args)
+          if (typeof selectedModel === "string") return selectedModel
+          const selectedModelTag = `${selectedModel.providerID}/${selectedModel.modelID}${selectedModel.variant ? `/${selectedModel.variant}` : ""}`
           const focus = (args.focus ?? "").trim()
           let done = 0
 
@@ -512,11 +612,11 @@ export const RecallPlugin: Plugin = async (input) => {
               const found = resolve(idOrSlug, "summarizing")
               if (!found) return `# ${idOrSlug}\nNo session found.`
               const { s, note } = found
-              const r = await summarizer.summarize(s, focus, args.refresh === true, ctx?.abort)
+              const r = await summarizer.summarize(s, focus, args.refresh === true, ctx?.abort, selectedModel)
               const suffix = focus ? ` · focus: ${focus}` : ""
               const status = r.cachedAt
-                ? `(cached ${fmtDateTime(r.cachedAt)} · ${summarizer.modelTag}${suffix})`
-                : `(fresh · ${summarizer.modelTag}${r.messages ? ` · ${r.messages} messages` : ""}${r.secs ? ` · ${r.secs.toFixed(1)}s` : ""}${suffix})`
+                ? `(cached ${fmtDateTime(r.cachedAt)} · ${selectedModelTag}${suffix})`
+                : `(fresh · ${selectedModelTag}${r.messages ? ` · ${r.messages} messages` : ""}${r.secs ? ` · ${r.secs.toFixed(1)}s` : ""}${suffix})`
               return `${header(s, note)}\n${status}\n\n${r.summary}`
             } catch (e) {
               log("summarize failed", idOrSlug, e)
@@ -532,7 +632,7 @@ export const RecallPlugin: Plugin = async (input) => {
           })
 
           if (blocks.length === 1) {
-            const title = source.findSession(ids[0])[0]?.title ?? ids[0]
+            const title = resolve(ids[0], "summarizing")?.s.title ?? ids[0]
             return { title: `recall summary: ${title}`, output: blocks[0] }
           }
           return { title: `recall summaries: ${blocks.length} sessions`, output: blocks.join("\n\n---\n\n") }
@@ -554,7 +654,8 @@ export const RecallPlugin: Plugin = async (input) => {
                 ? `idle (last run ${fmtDateTime(st.lastRun)})`
                 : "not yet run"
           const lines = [
-            `sessions indexed: ${c.indexed}/${c.total}`,
+            `sessions indexed: ${c.indexed}/${c.total} eligible`,
+            `sessions excluded: ${c.excluded} (${exclusions.entries().length} configured directories)`,
             `embedded chunks: ${c.chunks}`,
             `fts rows: ${c.ftsRows}`,
             `backfill: ${backfill}`,

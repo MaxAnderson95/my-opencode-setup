@@ -73,12 +73,15 @@ The **escalation rung**: summarizes an entire session — or answers a focused q
 | `session_ids` | — | Batch: several ids/slugs summarized **concurrently** in one call (max 24, 4 workers in parallel) |
 | `focus` | — | Optional question to answer from each transcript instead of a general summary |
 | `refresh` | `false` | Bypass the cache and re-summarize |
+| `providerID` | `openai` | Provider override; validated against the live catalog |
+| `modelID` | `gpt-5.6-luna` | Model override; validated for the selected provider |
+| `variant` | `low` | Provider-specific reasoning-effort override; use `default` for the model default |
 
 Mechanics:
 
 - The transcript is compacted (collapsed tool one-liners, trimmed text) and middle-out truncated to a 300k-char budget — goals live at the start of a session, outcomes at the end, so the middle goes first.
 - The prompt runs in an **ephemeral worker session** via the server API with `tools: {"*": false}` (the worker model cannot call tools) and a purpose-built system prompt; the worker session is deleted afterwards and is never indexed by recall.
-- Results are **cached permanently** in the sidecar DB keyed by `(session_id, model, focus)` and invalidated only if the source session's `time_updated` changes. Repeat calls are instant and free. Cached summaries survive an index reset.
+- Results are **cached permanently** in the sidecar DB keyed by `(session_id, model, variant, focus)` and invalidated only if the source session's `time_updated` changes. Repeat calls are instant and free. Cached summaries survive an index reset.
 - **Batching**: `session_ids` runs up to 4 workers concurrently through a promise pool with per-session error isolation (one bad id yields one error block, not a failed batch), live progress in the tool title (`recall summarize: 3/8`), and in-flight dedupe so concurrent requests for the same session share one worker. Cancelling the tool call aborts in-flight workers (`ctx.abort`), which are still cleaned up.
 - Sizing: a 16-message session summarizes in ~9 s fresh, focused questions in ~2 s, cache hits in ~0 s. A batch's wall time ≈ its slowest session, not the sum: measured 51.7 s for a batch whose sequential sum was 88 s.
 
@@ -118,14 +121,14 @@ Toasts are fire-and-forget and never throw: headless runs (`opencode run`, sched
         └── sessions  metadata for result headers and directory filtering
 ```
 
-- **Embeddings:** `Xenova/bge-small-en-v1.5` (q8, 384-dim) via in-process transformers.js — no daemon. The model (~33 MB) is cached under `~/.local/share/opencode-recall/models/` on first use. The embedder is lazy-loaded on demand and disposed after 10 minutes idle, reclaiming ~300 MB RSS.
+- **Embeddings:** `Xenova/bge-small-en-v1.5` (q8, 384-dim) via transformers.js in a private local child process; no daemon or network service. The model (~33 MB) is cached under `~/.local/share/opencode-recall/models/` on first use. The child is lazy-started on demand and killed after 10 minutes idle, reclaiming ~300 MB RSS. Keeping `onnxruntime-node` outside OpenCode's Bun worker prevents worker teardown from crashing the TUI through NAPI.
 - **Chunking:** each turn (a user message plus the assistant messages that follow it) is windowed into overlapping 1200-character chunks rather than truncated. Windows past the first are re-anchored with the user's intent, because a bare slice of mid-turn prose retrieves poorly on its own. Pathological turns are capped head-and-tail at 60k characters.
 - **Segmentation:** long text and reasoning parts are *split* across FTS rows rather than truncated, so nothing becomes unsearchable and BM25 length normalisation is not skewed by the occasional 400 KB message. Tool output is still capped (16 KB) before segmentation.
 - **Contentless FTS:** the FTS table stores no copy of the indexed text. Snippets are rendered from opencode's own database using the part id and segment offset recorded at index time, which means excerpts come from the untruncated original and the index does not carry a second copy of the corpus.
 - **Semantic search** is brute-force cosine over an in-memory Float32 matrix, rebuilt only when the chunks table changes (signature: row count + max id, which cannot repeat because chunk ids are AUTOINCREMENT). No ANN index — a full scan is milliseconds at this scale.
 - **Indexing** is idempotent per session (delete + reinsert in one transaction), driven by `session.idle` with a startup catch-up pass ~20–30 s after launch using each session's `time_updated` watermark. Embeddings are reused across reindexes via content hash, so re-indexing a growing session costs only its new turns. Sessions deleted from the source are purged.
 - **One backfiller at a time.** Every opencode process loads its own copy of the plugin, so the startup pass is gated by a heartbeated lease in the index; other processes skip it rather than each re-walking the same stale sessions. WAL plus busy timeouts keep concurrent writes safe regardless.
-- **Containment:** if init fails the plugin registers only `recall_status`, which explains why. Semantic failures fall back to lexical. `dispose()` drains in-flight work (8 s cap) before releasing the ONNX session. Diagnostics go to `~/.local/share/opencode-recall/recall.log` (self-truncating at 5 MB).
+- **Containment:** if init fails the plugin registers only `recall_status`, which explains why. Semantic failures fall back to lexical. `dispose()` drains in-flight work (8 s cap) before killing the isolated embedding child. The child is terminated with `SIGKILL` because running Bun/ONNX teardown is the crash being contained. Diagnostics go to `~/.local/share/opencode-recall/recall.log` (self-truncating at 5 MB).
 - The plugin's own tool outputs are never indexed (no recursive meta-noise), and ANSI escapes are stripped at both index and display time.
 
 ## Layout
@@ -136,7 +139,8 @@ lib/config.ts        defaults, recall.json, env overrides
 lib/text.ts          pure helpers: chunking, segmentation, snippets, FTS query building
 lib/source.ts        everything that knows opencode's own schema
 lib/schema.ts        sidecar DDL, versioned migration, backfill lease
-lib/embedder.ts      lazy transformers.js embedder (+ a deterministic fake for tests)
+lib/embedder.ts      lazy embedding subprocess client (+ a deterministic fake for tests)
+lib/embedder-worker.ts  isolated transformers.js / ONNX runtime
 lib/notify.ts        toast delivery and the policy for when to stay quiet
 lib/indexer.ts       index writer and backfill
 lib/search.ts        lexical branch, semantic branch, RRF fusion, snippet resolution
@@ -148,7 +152,7 @@ recall.test.ts       bun test
 Modules take their dependencies as arguments rather than reaching for module state, which is what lets the ranking- and chunking-sensitive logic be tested against an in-memory database and a deterministic fake embedder.
 
 ```bash
-cd plugins/recall && bun test        # 70 tests
+cd plugins/recall && bun test        # 83 tests
 bunx tsc --noEmit -p tsconfig.json
 ```
 
@@ -159,6 +163,9 @@ Everything works with no configuration. To override, create `~/.config/opencode/
 ```jsonc
 {
   "embed": { "model": "Xenova/bge-small-en-v1.5", "dims": 384 },
+  "index": {
+    "excludeDirectories": ["~/Projects/private-project"]
+  },
   "chunk": { "chars": 1200, "overlap": 200, "maxPerTurn": 60000 },
   "fts": { "toolOutputChars": 16000, "segmentChars": 8000 },
   "search": { "candidates": 60, "rrfK": 60, "inspectSemMin": 0.55 },
@@ -181,6 +188,8 @@ Environment variables win over the file:
 | `RECALL_SUMMARY_MODEL` | `provider/model` or `provider/model/variant` |
 | `RECALL_DISABLE_SUMMARIZE=1` | Drop the fourth rung and its worker agent |
 | `RECALL_QUIET=1` | Suppress all background-work toasts |
+
+`index.excludeDirectories` accepts absolute paths and `~/` paths. A configured directory and all of its descendants are excluded without matching similarly prefixed siblings. Changes are detected within five seconds: newly excluded sessions are removed from FTS, embeddings, metadata, and the summary cache; newly eligible sessions are picked up by backfill. A malformed config edit keeps the last valid exclusion policy active. Exclusion affects every recall tool, including direct transcript reads, but does not delete conversations from OpenCode's source database.
 
 ## Install
 

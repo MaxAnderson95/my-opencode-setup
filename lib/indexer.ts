@@ -8,6 +8,7 @@
 import type { Database } from "bun:sqlite"
 import type { Config } from "./config.ts"
 import type { Embedder } from "./embedder.ts"
+import type { DirectoryExclusions } from "./exclusions.ts"
 import { BackfillAnnouncer, noopNotify, type Notify } from "./notify.ts"
 import { Source, extractPartText, parseJson, type SessionRow } from "./source.ts"
 import { chunkText, clean, segmentText } from "./text.ts"
@@ -23,6 +24,7 @@ export type IndexerDeps = {
   source: Source
   embedder: Embedder
   config: Config
+  exclusions: DirectoryExclusions
   log: (...args: unknown[]) => void
   /** Tool names whose output must never be indexed (recall's own, to avoid meta-noise). */
   skipTools: ReadonlySet<string>
@@ -108,13 +110,14 @@ export class Indexer {
     return (this.stmts ??= this.prepare())
   }
 
-  purge(sessionId: string): void {
+  purge(sessionId: string, includeSummary = false): void {
     const run = this.d.idx.transaction(() => {
       this.s.delFts.run(sessionId)
       this.s.delParts.run(sessionId)
       this.s.delChunks.run(sessionId)
       this.s.delIndexed.run(sessionId)
       this.s.delSession.run(sessionId)
+      if (includeSummary) this.d.idx.run(`DELETE FROM summaries WHERE session_id=?`, [sessionId])
     })
     run()
   }
@@ -204,6 +207,10 @@ export class Indexer {
         this.purge(sessionId)
         return
       }
+      if (this.d.exclusions.matches(s.directory)) {
+        this.purge(sessionId, true)
+        return
+      }
       if (s.title?.startsWith(this.d.workerPrefix)) return
       const wm = this.s.watermark.get(sessionId) as { t: number } | null
       if (wm && wm.t >= s.time_updated) return
@@ -227,6 +234,12 @@ export class Indexer {
           const v = vecs[i]
           fresh.set(c.hash, new Uint8Array(v.buffer, v.byteOffset, this.d.config.embed.dims * 4))
         })
+      }
+
+      // The config can change while embeddings are being generated.
+      if (this.d.exclusions.matches(s.directory)) {
+        this.purge(sessionId, true)
+        return
       }
 
       const write = this.d.idx.transaction(() => {
@@ -282,7 +295,8 @@ export class Indexer {
     this.state.running = true
     this.state.lastRun = Date.now()
     try {
-      const source = this.d.source.allSessions()
+      const allSource = this.d.source.allSessions()
+      const source = allSource.filter((s) => !this.d.exclusions.matches(s.directory))
       const wms = new Map(
         (
           this.d.idx.query(`SELECT session_id s, time_updated t FROM indexed_sessions`).all() as {
@@ -320,6 +334,7 @@ export class Indexer {
       }
       const alive = new Set(source.map((s) => s.id))
       for (const [sid] of wms) if (!alive.has(sid)) this.purge(sid)
+      for (const s of allSource) if (this.d.exclusions.matches(s.directory)) this.purge(s.id, true)
       if (stale.length) {
         // A bulk load leaves the FTS index in many small segments. Merging them
         // is seconds of work and measurably improves tail latency; not worth it
@@ -346,5 +361,12 @@ export class Indexer {
       this.state.running = false
       lease?.release()
     }
+  }
+
+  /** Remove excluded sessions immediately, including summaries that survive ordinary index purges. */
+  reconcileExclusions(): number {
+    const excluded = this.d.source.allSessions().filter((s) => this.d.exclusions.matches(s.directory))
+    for (const s of excluded) this.purge(s.id, true)
+    return excluded.length
   }
 }

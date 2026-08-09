@@ -3,13 +3,14 @@ import { Database } from "bun:sqlite"
 
 import { loadConfig, parseModelSpec, summaryModelTag } from "./lib/config.ts"
 import { createFakeEmbedder } from "./lib/embedder.ts"
+import { DirectoryExclusions } from "./lib/exclusions.ts"
 import { createSourceDb, type FixtureSession } from "./lib/fixture.ts"
 import { Indexer } from "./lib/indexer.ts"
 import { BackfillAnnouncer, createNotifier, noopNotify, type Toast } from "./lib/notify.ts"
 import { BackfillLease, migrate, openIndex, setMeta, SCHEMA_VERSION } from "./lib/schema.ts"
 import { SearchIndex, fuse, type Filters, type Hit } from "./lib/search.ts"
 import { Source, extractPartText } from "./lib/source.ts"
-import { WORKER_PREFIX, pool } from "./lib/summarize.ts"
+import { Summarizer, WORKER_PREFIX, pool } from "./lib/summarize.ts"
 import { chunkText, clean, ftsQuery, makeSnippet, middleOut, segmentText, stripAnsi } from "./lib/text.ts"
 
 // ------------------------------------------------------------------ text
@@ -157,6 +158,8 @@ describe("config", () => {
     expect(source).toBe("defaults")
     expect(config.embed.dims).toBe(384)
     expect(config.summary.enabled).toBe(true)
+    expect(config.index.excludeDirectories).toEqual([])
+    expect(config.summary.model).toEqual({ providerID: "openai", modelID: "gpt-5.6-luna", variant: "low" })
   })
 
   test("file overrides defaults, deep-merged", () => {
@@ -188,6 +191,16 @@ describe("config", () => {
     const { config } = loadConfig({}, () => `{"bogus":1,"embed":{"nope":2,"dims":128}}`, "/home/t")
     expect((config as any).bogus).toBeUndefined()
     expect(config.embed.dims).toBe(128)
+  })
+
+  test("loads valid directory exclusions and drops invalid entries", () => {
+    const { config, warnings } = loadConfig(
+      {},
+      () => `{"index":{"excludeDirectories":["~/secret","",42]}}`,
+      "/home/t",
+    )
+    expect(config.index.excludeDirectories).toEqual(["~/secret"])
+    expect(warnings[0]).toContain("2 invalid")
   })
 
   test("env beats file", () => {
@@ -226,6 +239,20 @@ describe("config", () => {
   test("summaryModelTag round-trips the variant", () => {
     const { config } = loadConfig({ RECALL_SUMMARY_MODEL: "openai/m/low" }, () => null)
     expect(summaryModelTag(config)).toBe("openai/m/low")
+  })
+})
+
+describe("directory exclusions", () => {
+  test("matches an exact directory and descendants, but not sibling prefixes", () => {
+    const exclusions = new DirectoryExclusions(["~/Projects/private/"], "/Users/test")
+    expect(exclusions.matches("/Users/test/Projects/private")).toBe(true)
+    expect(exclusions.matches("/Users/test/Projects/private/subdir")).toBe(true)
+    expect(exclusions.matches("/Users/test/Projects/private-old")).toBe(false)
+  })
+
+  test("ignores relative exclusion roots", () => {
+    const exclusions = new DirectoryExclusions(["Projects/private"], "/Users/test")
+    expect(exclusions.matches("/Users/test/Projects/private")).toBe(false)
   })
 })
 
@@ -573,17 +600,19 @@ function buildIndex(sessions: FixtureSession[], overrides: Record<string, unknow
   migrate(idx, "test:8", () => 0)
   const source = new Source(src)
   const embedder = createFakeEmbedder(DIMS)
+  const exclusions = new DirectoryExclusions(config.index.excludeDirectories, "/home/t")
   const indexer = new Indexer({
     idx,
     source,
     embedder,
     config,
+    exclusions,
     log: () => {},
     skipTools: new Set(["recall_search"]),
     workerPrefix: WORKER_PREFIX,
   })
   const searcher = new SearchIndex(idx, source, embedder, config, () => {})
-  return { src, idx, source, indexer, searcher, config }
+  return { src, idx, source, indexer, searcher, config, exclusions }
 }
 
 const NO_FILTER: Filters = {
@@ -828,6 +857,45 @@ describe("indexing and search", () => {
     src.run(`DELETE FROM session WHERE id='ses_y'`)
     await indexer.backfill()
     expect(idx.query(`SELECT session_id FROM indexed_sessions`).all()).toEqual([{ session_id: "ses_x" }])
+  })
+
+  test("excluded directories are never indexed and are purged with cached summaries", async () => {
+    const { indexer, idx, source, config, exclusions } = buildIndex([
+      {
+        id: "ses_allowed",
+        directory: "/home/t/Projects/allowed",
+        messages: [{ role: "user", parts: [{ type: "text", text: "allowed" }] }],
+      },
+      {
+        id: "ses_private",
+        directory: "/home/t/Projects/private/child",
+        messages: [{ role: "user", parts: [{ type: "text", text: "private" }] }],
+      },
+    ])
+    await indexer.backfill()
+    idx.run(
+      `INSERT INTO summaries(session_id,model,focus,time_updated,summary,created) VALUES ('ses_private','m','',1,'secret',1)`,
+    )
+    exclusions.update(["~/Projects/private"])
+    expect(indexer.reconcileExclusions()).toBe(1)
+    await indexer.indexSession("ses_private")
+    expect(idx.query(`SELECT session_id FROM indexed_sessions ORDER BY session_id`).all()).toEqual([
+      { session_id: "ses_allowed" },
+    ])
+    expect(idx.query(`SELECT count(*) c FROM summaries`).get()).toEqual({ c: 0 })
+
+    const summarizer = new Summarizer({
+      idx,
+      source,
+      config,
+      exclusions,
+      client: { session: {} },
+      home: "/home/t",
+      log: () => {},
+    })
+    await expect(summarizer.summarize(source.session("ses_private")!, "", false)).rejects.toThrow(
+      "session is excluded",
+    )
   })
 
   test("backfill defers to a held lease", async () => {
