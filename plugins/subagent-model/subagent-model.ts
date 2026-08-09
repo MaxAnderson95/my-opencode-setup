@@ -32,9 +32,10 @@
  *   1. Validate providerID/modelID (and the variant, if given) against
  *      client.config.providers(), and the agent name against client.app.agents().
  *   2. Create a child session (parentID = current session).
- *   3. client.session.prompt(childID, { agent, model: { providerID, modelID },
+ *   3. Bridge child permission requests through the parent tool context.
+ *   4. client.session.prompt(childID, { agent, model: { providerID, modelID },
  *      variant, parts }) — the prompt endpoint honors both per-call overrides.
- *   4. Return the subagent's final assistant text.
+ *   5. Return the subagent's final assistant text.
  *
  * Verified against the opencode SDK: session.create body { parentID, title };
  * session.prompt body { agent, model: { providerID, modelID }, variant, parts };
@@ -42,7 +43,7 @@
  * tokens (see Session.getUsage: tokens * cost / 1_000_000).
  */
 
-import { tool, type Plugin } from "@opencode-ai/plugin"
+import { tool, type Plugin, type ToolContext } from "@opencode-ai/plugin"
 
 type CatalogModel = {
   id: string
@@ -61,6 +62,137 @@ const DEFAULT_AGENT = "general"
 const MAX_LIST_ROWS = 200
 /** Sentinel the core itself uses for "no variant override" (see SessionPrompt.currentModel). */
 const DEFAULT_VARIANT = "default"
+
+interface PermissionAskedEvent {
+  type: "permission.asked"
+  properties: {
+    id: string
+    sessionID: string
+    permission: string
+    patterns: string[]
+    metadata: Record<string, unknown>
+    always: string[]
+  }
+}
+
+type PluginClient = Parameters<Plugin>[0]["client"]
+
+function isPermissionAskedEvent(event: unknown): event is PermissionAskedEvent {
+  if (!event || typeof event !== "object") return false
+  const candidate = event as Partial<PermissionAskedEvent>
+  return candidate.type === "permission.asked" && typeof candidate.properties?.id === "string"
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException("The operation was aborted", "AbortError")
+}
+
+export async function runWithPermissionBridge<T>(input: {
+  client: PluginClient
+  context: ToolContext
+  childSessionID: string
+  subscribe: (listener: (event: unknown) => void) => () => void
+  run: () => Promise<T>
+}): Promise<T> {
+  const { client, context, childSessionID, run, subscribe } = input
+  let pendingRequestID: string | undefined
+  let cancelled = false
+  let cancellation: Promise<void> | undefined
+  let rejectAbort!: (reason: unknown) => void
+  const abortFailure = new Promise<never>((_, reject) => {
+    rejectAbort = reject
+  })
+
+  const reply = async (requestID: string, response: "once" | "reject") => {
+    await client.postSessionIdPermissionsPermissionId({
+      path: { id: childSessionID, permissionID: requestID },
+      query: { directory: context.directory },
+      body: { response },
+    })
+  }
+
+  const cancel = () => {
+    cancelled = true
+    cancellation ??= (async () => {
+      const requestID = pendingRequestID
+      pendingRequestID = undefined
+      try {
+        if (requestID) await reply(requestID, "reject")
+      } finally {
+        await client.session.abort({
+          path: { id: childSessionID },
+          query: { directory: context.directory },
+        })
+      }
+    })()
+    return cancellation
+  }
+
+  const onAbort = () => {
+    rejectAbort(abortReason(context.abort))
+    void cancel().catch(() => {})
+  }
+  context.abort.addEventListener("abort", onAbort, { once: true })
+
+  try {
+    if (context.abort.aborted) {
+      await cancel()
+      throw abortReason(context.abort)
+    }
+
+    let rejectListener!: (reason: unknown) => void
+    const listenerFailure = new Promise<never>((_, reject) => {
+      rejectListener = reject
+    })
+    let eventChain = Promise.resolve()
+    const unsubscribe = subscribe((event) => {
+      eventChain = eventChain
+        .then(async () => {
+          if (!isPermissionAskedEvent(event)) return
+          const permission = event.properties
+          if (permission.sessionID !== childSessionID) return
+
+          if (cancelled) {
+            await reply(permission.id, "reject")
+            return
+          }
+
+          pendingRequestID = permission.id
+          await Promise.race([
+            context.ask({
+              permission: permission.permission,
+              patterns: permission.patterns,
+              always: permission.always,
+              metadata: permission.metadata,
+            }),
+            abortFailure,
+          ])
+
+          if (cancelled) return
+          await reply(permission.id, "once")
+          pendingRequestID = undefined
+        })
+        .catch(async (error) => {
+          try {
+            await cancel()
+            rejectListener(error)
+          } catch (cancelError) {
+            rejectListener(cancelError)
+          }
+        })
+    })
+
+    try {
+      return await Promise.race([run(), listenerFailure, abortFailure])
+    } finally {
+      unsubscribe()
+      await eventChain
+      if (cancellation) await cancellation
+    }
+  } finally {
+    context.abort.removeEventListener("abort", onAbort)
+  }
+}
 
 function fmtErr(error: unknown): string {
   if (!error) return "unknown error"
@@ -117,6 +249,17 @@ function modelLine(providerID: string, m: CatalogModel): string {
 
 export const SubagentModelPlugin: Plugin = async ({ client, directory }) => {
   const query = { directory }
+  const permissionListeners = new Map<string, Set<(event: unknown) => void>>()
+
+  function subscribeToChildPermissions(childSessionID: string, listener: (event: unknown) => void) {
+    const listeners = permissionListeners.get(childSessionID) ?? new Set()
+    listeners.add(listener)
+    permissionListeners.set(childSessionID, listeners)
+    return () => {
+      listeners.delete(listener)
+      if (!listeners.size) permissionListeners.delete(childSessionID)
+    }
+  }
 
   // Fetched fresh (not cached) so newly authenticated providers / added agents
   // are always reflected. These are cheap local server calls.
@@ -200,6 +343,11 @@ export const SubagentModelPlugin: Plugin = async ({ client, directory }) => {
   }
 
   return {
+    async event({ event }) {
+      const candidate: unknown = event
+      if (!isPermissionAskedEvent(candidate)) return
+      for (const listener of permissionListeners.get(candidate.properties.sessionID) ?? []) listener(candidate)
+    },
     tool: {
       task_with_model: tool({
         description:
@@ -263,54 +411,53 @@ export const SubagentModelPlugin: Plugin = async ({ client, directory }) => {
           })
           if (created.error || !created.data) return `Failed to create subagent session: ${fmtErr(created.error)}`
           const childID = created.data.id
+          ctx.metadata({ metadata: { childSessionID: childID } })
 
-          // If the parent tool call is aborted, cancel the child session too.
-          const onAbort = () => {
-            client.session.abort({ path: { id: childID }, query }).catch(() => {})
+          type PromptBody = NonNullable<Parameters<typeof client.session.prompt>[0]["body"]>
+          // The generated SDK types (through 1.18.5) omit `variant` from the prompt
+          // body even though the server's own schema accepts it (see the server's
+          // GET /doc, POST /session/{sessionID}/message), hence the cast.
+          const body: PromptBody & { variant?: string } = {
+            agent: agentName,
+            model: { providerID, modelID },
+            ...(variant ? { variant } : {}),
+            parts: [{ type: "text", text: args.prompt }],
           }
-          ctx.abort.addEventListener("abort", onAbort)
+          const res = await runWithPermissionBridge({
+            client,
+            context: ctx,
+            childSessionID: childID,
+            subscribe: (listener) => subscribeToChildPermissions(childID, listener),
+            run: () =>
+              client.session.prompt({
+                path: { id: childID },
+                query,
+                body: body as PromptBody,
+                signal: ctx.abort,
+              }),
+          })
+          if (res.error || !res.data) return `Subagent run failed: ${fmtErr(res.error)}`
 
-          try {
-            type PromptBody = NonNullable<Parameters<typeof client.session.prompt>[0]["body"]>
-            // The generated SDK types (through 1.18.5) omit `variant` from the prompt
-            // body even though the server's own schema accepts it (see the server's
-            // GET /doc, POST /session/{sessionID}/message), hence the cast.
-            const body: PromptBody & { variant?: string } = {
-              agent: agentName,
-              model: { providerID, modelID },
-              ...(variant ? { variant } : {}),
-              parts: [{ type: "text", text: args.prompt }],
-            }
-            const res = await client.session.prompt({
-              path: { id: childID },
-              query,
-              body: body as PromptBody,
-            })
-            if (res.error || !res.data) return `Subagent run failed: ${fmtErr(res.error)}`
+          const parts = res.data.parts ?? []
+          type PartItem = (typeof parts)[number]
+          const lastText = [...parts]
+            .reverse()
+            .find(
+              (p): p is Extract<PartItem, { type: "text" }> =>
+                p.type === "text" && !(p as { synthetic?: boolean }).synthetic,
+            )
+          const text = lastText?.text ?? ""
 
-            const parts = res.data.parts ?? []
-            type PartItem = (typeof parts)[number]
-            const lastText = [...parts]
-              .reverse()
-              .find(
-                (p): p is Extract<PartItem, { type: "text" }> =>
-                  p.type === "text" && !(p as { synthetic?: boolean }).synthetic,
-              )
-            const text = lastText?.text ?? ""
-
-            const header = `[subagent @${agentName} on ${label} — session ${childID}]`
-            // A failed run (bad credentials, provider rejection, aborted) comes back
-            // 200 with no text and the reason parked on the message, so surface it
-            // instead of an unhelpful "(no text output)".
-            const runError = res.data.info?.error
-            const fallback = runError ? `run failed: ${fmtErr(runError)}` : "(no text output)"
-            return {
-              title: `@${agentName} · ${label}`,
-              output: `${header}\n\n${text || fallback}`,
-              metadata: { childSessionID: childID, providerID, modelID, variant, agent: agentName },
-            }
-          } finally {
-            ctx.abort.removeEventListener("abort", onAbort)
+          const header = `[subagent @${agentName} on ${label} — session ${childID}]`
+          // A failed run (bad credentials, provider rejection, aborted) comes back
+          // 200 with no text and the reason parked on the message, so surface it
+          // instead of an unhelpful "(no text output)".
+          const runError = res.data.info?.error
+          const fallback = runError ? `run failed: ${fmtErr(runError)}` : "(no text output)"
+          return {
+            title: `@${agentName} · ${label}`,
+            output: `${header}\n\n${text || fallback}`,
+            metadata: { childSessionID: childID, providerID, modelID, variant, agent: agentName },
           }
         },
       }),
