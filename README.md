@@ -19,6 +19,7 @@ Bodies use Hark's full **2,000-character** allowance (`maxBody`); the finish exc
 
 ## Noise control
 
+- **Only when you're away.** Every notification is gated on the `presence` plugin's `is_user_at_computer` check. If you are sitting at the Mac, nothing is sent, since the push would land in your pocket while you read the same message on screen. If the presence check fails outright, the notification is sent anyway, on the logic that a wasted push beats silence. Set **`HARK_ALWAYS_NOTIFY=1`** to bypass the gate (read once at startup).
 - **Only long sessions notify.** A session must have been busy for at least **5 minutes** (`minBusyMs = 300_000`) before any notification fires — quick tasks stay silent.
 - **Sub-agent (child) sessions are skipped** — you only hear about top-level sessions.
 - Idle notifications are debounced by 1s to avoid flapping.
