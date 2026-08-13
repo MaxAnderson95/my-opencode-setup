@@ -1,4 +1,4 @@
-import { tool, type Plugin } from "@opencode-ai/plugin"
+import { Plugin } from "@opencode-ai/plugin"
 import { execFile } from "node:child_process"
 import { readFile, writeFile } from "node:fs/promises"
 import { homedir, tmpdir } from "node:os"
@@ -319,12 +319,14 @@ export const presence = async () => {
   }
 }
 
-export const PresencePlugin: Plugin = async () => {
-  if (process.platform !== "darwin") return {}
+export default Plugin.define({
+  id: "presence",
+  setup: async (ctx) => {
+    if (process.platform !== "darwin") return
 
-  return {
-    tool: {
-      is_user_at_computer: tool({
+    await ctx.tool.transform((tools) => {
+      tools.add({
+        name: "is_user_at_computer",
         description:
           "Check whether the user is physically at their Mac right now, to decide where to put something that needs their attention. " +
           "Returns atComputer (boolean) with a confidence level, the reason, and the underlying signals: keyboard/mouse idle time, " +
@@ -333,24 +335,19 @@ export const PresencePlugin: Plugin = async () => {
           "only into the session; atComputer true means they are looking at the screen, so answer in the session and do not push. " +
           "Use before sending a phone notification, before blocking on an approval or question in a long-running task, and when " +
           "deciding whether to wait for a reply or keep working.",
-        args: {},
-        async execute() {
+        input: { type: "object", properties: {}, additionalProperties: false },
+        // Keep the tool directly exposed under its exact name; routed through
+        // CodeMode it would no longer be callable the way agents and skills
+        // expect.
+        options: { codemode: false },
+        execute: async () => {
           const result = await presence()
-          const phone =
-            "present" in result.signals.phone && result.signals.phone.present && result.signals.phone.live
-              ? " · phone live"
-              : ""
-          const state = result.atComputer ? "At computer" : "Away"
-          const idle = result.idleHuman ? ` · ${result.idleHuman} idle` : ""
           return {
-            title: `${state} (${result.confidence})${idle}${phone}`,
-            output: JSON.stringify(result, null, 2),
+            content: JSON.stringify(result, null, 2),
             metadata: result,
           }
         },
-      }),
-    },
-  }
-}
-
-export default PresencePlugin
+      })
+    })
+  },
+})
