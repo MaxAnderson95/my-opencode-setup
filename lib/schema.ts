@@ -73,7 +73,7 @@ export function createSchema(db: Database): void {
     PRIMARY KEY (session_id, model, focus))`)
 }
 
-function getMeta(db: Database, key: string): string | null {
+export function getMeta(db: Database, key: string): string | null {
   const row = db.query(`SELECT value FROM meta WHERE key=?`).get(key) as { value: string } | null
   return row?.value ?? null
 }

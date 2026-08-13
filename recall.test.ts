@@ -4,13 +4,19 @@ import { Database } from "bun:sqlite"
 import { loadConfig, parseModelSpec, summaryModelTag } from "./lib/config.ts"
 import { createFakeEmbedder } from "./lib/embedder.ts"
 import { DirectoryExclusions } from "./lib/exclusions.ts"
-import { createSourceDb, type FixtureSession } from "./lib/fixture.ts"
+import {
+  addV1Session,
+  createSourceDb,
+  createSourceDbV1,
+  insertV2Message,
+  type FixtureSession,
+} from "./lib/fixture.ts"
 import { Indexer } from "./lib/indexer.ts"
-import { BackfillAnnouncer, createNotifier, noopNotify, type Toast } from "./lib/notify.ts"
-import { BackfillLease, migrate, openIndex, setMeta, SCHEMA_VERSION } from "./lib/schema.ts"
+import { BackfillAnnouncer, logNotifier, type Toast } from "./lib/notify.ts"
+import { BackfillLease, getMeta, migrate, openIndex, setMeta, SCHEMA_VERSION } from "./lib/schema.ts"
 import { SearchIndex, fuse, type Filters, type Hit } from "./lib/search.ts"
-import { Source, extractPartText } from "./lib/source.ts"
-import { Summarizer, WORKER_PREFIX, pool } from "./lib/summarize.ts"
+import { Source, extractPartText, parseJson } from "./lib/source.ts"
+import { Summarizer, WORKER_PREFIX, pool, type SessionClient } from "./lib/summarize.ts"
 import { chunkText, clean, ftsQuery, makeSnippet, middleOut, segmentText, stripAnsi } from "./lib/text.ts"
 
 // ------------------------------------------------------------------ text
@@ -455,30 +461,11 @@ describe("BackfillAnnouncer", () => {
     expect(out).toHaveLength(0)
   })
 
-  test("notifier is a no-op when there is no TUI to toast at", () => {
-    expect(createNotifier(undefined, () => {})).toBe(noopNotify)
-    expect(createNotifier({}, () => {})).toBe(noopNotify)
-  })
-
-  test("a rejecting toast endpoint never escapes to the caller", () => {
-    const n = createNotifier({ tui: { showToast: () => Promise.reject(new Error("headless")) } }, () => {})
+  test("a throwing log sink never escapes the notifier", () => {
+    const n = logNotifier(() => {
+      throw new Error("boom")
+    })
     expect(() => n({ message: "hi" })).not.toThrow()
-  })
-
-  test("a throwing toast endpoint never escapes to the caller", () => {
-    const logged: unknown[] = []
-    const n = createNotifier(
-      {
-        tui: {
-          showToast: () => {
-            throw new Error("boom")
-          },
-        },
-      },
-      (...a) => logged.push(a),
-    )
-    expect(() => n({ message: "hi" })).not.toThrow()
-    expect(logged).toHaveLength(1)
   })
 })
 
@@ -520,6 +507,317 @@ describe("extractPartText", () => {
       { toolOutputChars: 1000 },
     )
     expect(r!.text).not.toContain("\u001b")
+  })
+})
+
+// ------------------------------------------------------------- v2 source layer
+
+describe("v2 source layer", () => {
+  const EXTRACT = { toolOutputChars: 16_000 }
+
+  test("maps user text, assistant text/reasoning/tool, and roles", () => {
+    const db = createSourceDb([
+      {
+        id: "ses_map",
+        messages: [
+          { role: "user", parts: [{ type: "text", text: "please check the pods" }] },
+          {
+            role: "assistant",
+            parts: [
+              { type: "reasoning", text: "user wants pod status" },
+              { type: "tool", tool: "bash", title: "kubectl get pods", output: "kube-proxy Running" },
+              { type: "text", text: "all pods are healthy" },
+            ],
+          },
+        ],
+      },
+    ])
+    const source = new Source(db)
+    const messages = source.messages("ses_map")
+    expect(messages.map((m) => m.role)).toEqual(["user", "assistant"])
+
+    const parts = source.parts("ses_map")
+    const extracted = parts.map((p) => extractPartText(parseJson(p.data), EXTRACT)!)
+    expect(extracted.map((e) => e.kind)).toEqual(["text", "reasoning", "tool", "text"])
+    expect(extracted[0].text).toBe("please check the pods")
+    expect(extracted[2].text).toBe("bash kubectl get pods\nkube-proxy Running")
+    // Part ids embed the message id and content index so they survive re-derivation.
+    expect(parts[2].id).toBe(`${messages[1].id}#1`)
+  })
+
+  test("session rows coalesce a null title and resolve ids and slugs", () => {
+    const db = createSourceDb([{ id: "ses_t", slug: "sluggy", messages: [] }])
+    db.run(`UPDATE session_v2 SET title=NULL WHERE id='ses_t'`)
+    const source = new Source(db)
+    expect(source.session("ses_t")!.title).toBe("")
+    expect(source.findSession("sluggy")[0]?.id).toBe("ses_t")
+  })
+
+  test("synthetic messages index as user text but stay out of the outline", () => {
+    const db = createSourceDb([
+      { id: "ses_syn", messages: [{ role: "user", parts: [{ type: "text", text: "real ask" }] }] },
+    ])
+    insertV2Message(db, "ses_syn", 1, "synthetic", { time: { created: 2 }, text: "injectedContextToken" }, 2)
+    const source = new Source(db)
+    const roles = source.messages("ses_syn").map((m) => m.role)
+    expect(roles).toEqual(["user", "user"])
+    const texts = source.parts("ses_syn").map((p) => extractPartText(parseJson(p.data), EXTRACT)!.text)
+    expect(texts).toContain("injectedContextToken")
+    expect(source.userTurns("ses_syn").map((t) => t.txt)).toEqual(["real ask"])
+  })
+
+  test("tool title falls back to the input's string values when metadata has none", () => {
+    const db = createSourceDb([{ id: "ses_ti", messages: [] }])
+    insertV2Message(
+      db,
+      "ses_ti",
+      0,
+      "assistant",
+      {
+        time: { created: 5 },
+        agent: "build",
+        model: { id: "m", providerID: "p" },
+        content: [
+          {
+            type: "tool",
+            id: "call_0",
+            name: "shell",
+            state: {
+              status: "completed",
+              input: { command: "kubectl get pods -A", workdir: "/tmp" },
+              content: [{ type: "text", text: "ok" }],
+              metadata: { exit: 0 },
+            },
+            time: { created: 5 },
+          },
+        ],
+      },
+      5,
+    )
+    const source = new Source(db)
+    const [part] = source.parts("ses_ti")
+    const extracted = extractPartText(parseJson(part.data), EXTRACT)!
+    expect(extracted.text).toBe("shell kubectl get pods -A /tmp\nok")
+  })
+
+  test("error and streaming tool states are not indexed", () => {
+    const db = createSourceDb([{ id: "ses_err", messages: [] }])
+    insertV2Message(
+      db,
+      "ses_err",
+      0,
+      "assistant",
+      {
+        time: { created: 5 },
+        agent: "build",
+        model: { id: "m", providerID: "p" },
+        content: [
+          {
+            type: "tool",
+            id: "call_0",
+            name: "shell",
+            state: { status: "error", input: {}, error: { type: "tool.execution", message: "boom" } },
+            time: { created: 5 },
+          },
+          { type: "tool", id: "call_1", name: "shell", state: { status: "streaming", input: "{" }, time: { created: 5 } },
+          { type: "text", text: "recovered" },
+        ],
+      },
+      5,
+    )
+    const source = new Source(db)
+    const parts = source.parts("ses_err")
+    const extracted = parts.map((p) => extractPartText(parseJson(p.data), EXTRACT))
+    expect(extracted.filter(Boolean).map((e) => e!.text)).toEqual(["recovered"])
+    // The text part keeps its content index even though earlier items were unusable.
+    expect(parts[2].id.endsWith("#2")).toBe(true)
+  })
+
+  test("compaction summaries are indexed and set the compaction boundary", () => {
+    const db = createSourceDb([
+      {
+        id: "ses_cmp",
+        messages: [
+          { role: "user", parts: [{ type: "text", text: "before compaction" }] },
+          { role: "assistant", parts: [{ type: "text", text: "compactedSummaryToken" }], summary: true },
+          { role: "user", parts: [{ type: "text", text: "after compaction" }] },
+        ],
+      },
+    ])
+    const source = new Source(db)
+    const boundary = source.compactionBoundary("ses_cmp")
+    expect(boundary).toBeGreaterThan(0)
+    const texts = source.parts("ses_cmp").map((p) => extractPartText(parseJson(p.data), EXTRACT)!.text)
+    expect(texts).toContain("compactedSummaryToken")
+    // Running/failed compactions carry no summary worth indexing or bounding.
+    const db2 = createSourceDb([{ id: "ses_run", messages: [] }])
+    insertV2Message(db2, "ses_run", 0, "compaction", { status: "running", reason: "auto", summary: "", recent: "" }, 5)
+    const source2 = new Source(db2)
+    expect(source2.compactionBoundary("ses_run")).toBe(0)
+    expect(source2.parts("ses_run")).toHaveLength(0)
+  })
+
+  test("shell and skill messages become searchable tool parts", () => {
+    const db = createSourceDb([{ id: "ses_sh", messages: [] }])
+    insertV2Message(
+      db,
+      "ses_sh",
+      0,
+      "shell",
+      {
+        shellID: "shl_1",
+        command: "kubectl rollout status",
+        status: "exited",
+        exit: 0,
+        output: { output: "deployment rolled out", cursor: 21, size: 21, truncated: false },
+        time: { created: 5 },
+      },
+      5,
+    )
+    insertV2Message(
+      db,
+      "ses_sh",
+      1,
+      "skill",
+      { skill: "skl_1", name: "cne-architecture", text: "the CNE skill body", time: { created: 6 } },
+      6,
+    )
+    const source = new Source(db)
+    const extracted = source.parts("ses_sh").map((p) => extractPartText(parseJson(p.data), EXTRACT)!)
+    expect(extracted[0]).toEqual({ kind: "tool", text: "shell kubectl rollout status\ndeployment rolled out" })
+    expect(extracted[1]).toEqual({ kind: "tool", text: "skill cne-architecture\nthe CNE skill body" })
+    expect(source.messages("ses_sh").map((m) => m.role)).toEqual(["shell", "skill"])
+  })
+
+  test("bookkeeping message types are invisible to recall", () => {
+    const db = createSourceDb([{ id: "ses_bk", messages: [] }])
+    insertV2Message(db, "ses_bk", 0, "agent-switched", { agent: "build", time: { created: 5 } }, 5)
+    insertV2Message(db, "ses_bk", 1, "model-switched", { model: { id: "m", providerID: "p" }, time: { created: 6 } }, 6)
+    const source = new Source(db)
+    expect(source.messages("ses_bk")).toHaveLength(0)
+    expect(source.messageCount("ses_bk")).toBe(0)
+    expect(source.parts("ses_bk")).toHaveLength(0)
+  })
+
+  test("partData re-derives the exact text parts() produced, for stored-offset stability", () => {
+    const db = createSourceDb([
+      {
+        id: "ses_rt",
+        messages: [
+          { role: "user", parts: [{ type: "text", text: "round trip" }] },
+          {
+            role: "assistant",
+            parts: [
+              { type: "text", text: "answer text" },
+              { type: "tool", tool: "grep", title: "pattern", output: "match line" },
+            ],
+          },
+        ],
+      },
+    ])
+    const source = new Source(db)
+    for (const part of source.parts("ses_rt")) {
+      const fromRow = extractPartText(parseJson(part.data), EXTRACT)
+      const fromLookup = extractPartText(source.partData(part.id), EXTRACT)
+      expect(fromLookup).toEqual(fromRow)
+    }
+    expect(source.partData("msg_missing#0")).toBeNull()
+    expect(source.partData(`msg_ses_rt_1#99`)).toBeNull()
+  })
+
+  test("renderMessage collapses repeated tool calls and trims text", () => {
+    const db = createSourceDb([
+      {
+        id: "ses_rm",
+        messages: [
+          {
+            role: "assistant",
+            parts: [
+              { type: "tool", tool: "edit", title: "file.ts", output: "ok" },
+              { type: "tool", tool: "edit", title: "file.ts", output: "ok" },
+              { type: "text", text: "done editing" },
+            ],
+          },
+        ],
+      },
+    ])
+    const source = new Source(db)
+    const [m] = source.messages("ses_rm")
+    const rendered = source.renderMessage(m, 800)!
+    expect(rendered).toContain("[tool edit] file.ts (×2)")
+    expect(rendered).toContain("done editing")
+    expect(rendered).toContain(m.id)
+  })
+})
+
+// ------------------------------------------------------- v1 fallback and union
+
+describe("v1 fallback and union", () => {
+  test("a v1-only database still works end to end", () => {
+    const db = createSourceDbV1([
+      { id: "ses_old", messages: [{ role: "user", parts: [{ type: "text", text: "legacy content" }] }] },
+    ])
+    const source = new Source(db)
+    expect(source.allSessions().map((s) => s.id)).toEqual(["ses_old"])
+    expect(source.messages("ses_old").map((m) => m.role)).toEqual(["user"])
+    const [part] = source.parts("ses_old")
+    expect(part.id.startsWith("prt_")).toBe(true)
+    expect(extractPartText(source.partData(part.id), { toolOutputChars: 100 })!.text).toBe("legacy content")
+  })
+
+  test("legacy-only sessions union into a v2 database and read through v1 tables", () => {
+    const db = createSourceDb([
+      { id: "ses_new", created: 2_000_000_000_000, messages: [{ role: "user", parts: [{ type: "text", text: "new" }] }] },
+    ])
+    addV1Session(db, {
+      id: "ses_orphan",
+      created: 1_600_000_000_000,
+      messages: [{ role: "user", parts: [{ type: "text", text: "orphanToken" }] }],
+    })
+    const source = new Source(db)
+    expect(source.allSessions().map((s) => s.id)).toEqual(["ses_new", "ses_orphan"])
+    expect(source.sessionCount()).toBe(2)
+    expect(source.session("ses_orphan")!.title).toBe("session ses_orphan")
+    const parts = source.parts("ses_orphan")
+    expect(parts[0].id.startsWith("prt_")).toBe(true)
+    expect(source.userTurns("ses_orphan").map((t) => t.txt)).toEqual(["orphanToken"])
+  })
+
+  test("a session present in both generations resolves to v2", () => {
+    const db = createSourceDb([
+      { id: "ses_dup", title: "v2 title", messages: [{ role: "user", parts: [{ type: "text", text: "v2 body" }] }] },
+    ])
+    addV1Session(db, {
+      id: "ses_dup",
+      title: "v1 title",
+      messages: [
+        { role: "user", parts: [{ type: "text", text: "v1 body" }] },
+        { role: "assistant", parts: [{ type: "text", text: "v1 answer" }] },
+      ],
+    })
+    const source = new Source(db)
+    expect(source.session("ses_dup")!.title).toBe("v2 title")
+    expect(source.allSessions()).toHaveLength(1)
+    expect(source.messageCount("ses_dup")).toBe(1)
+    const texts = source.parts("ses_dup").map((p) => extractPartText(parseJson(p.data), { toolOutputChars: 100 })!.text)
+    expect(texts).toEqual(["v2 body"])
+  })
+
+  test("legacy prt_ ids from pre-cutover index rows resolve even when the session is migrated", () => {
+    // A migrated session lives in v2, but index rows written before the cutover
+    // still reference v1 part ids; those must keep resolving for snippets.
+    const db = createSourceDb([
+      { id: "ses_mig", messages: [{ role: "user", parts: [{ type: "text", text: "v2 body" }] }] },
+    ])
+    addV1Session(db, { id: "ses_mig", messages: [{ role: "user", parts: [{ type: "text", text: "old body" }] }] })
+    const source = new Source(db)
+    expect(extractPartText(source.partData("prt_ses_mig_0_0"), { toolOutputChars: 100 })!.text).toBe("old body")
+  })
+
+  test("a pure v2 database tolerates legacy part ids", () => {
+    const db = createSourceDb([{ id: "ses_v2only", messages: [] }])
+    const source = new Source(db)
+    expect(source.partData("prt_whatever")).toBeNull()
   })
 })
 
@@ -588,8 +886,7 @@ describe("fuse", () => {
 
 const DIMS = 8
 
-function buildIndex(sessions: FixtureSession[], overrides: Record<string, unknown> = {}) {
-  const src = createSourceDb(sessions)
+function buildIndexFromDb(src: Database, overrides: Record<string, unknown> = {}) {
   const idx = new Database(":memory:")
   openIndex(idx)
   const { config } = loadConfig(
@@ -613,6 +910,10 @@ function buildIndex(sessions: FixtureSession[], overrides: Record<string, unknow
   })
   const searcher = new SearchIndex(idx, source, embedder, config, () => {})
   return { src, idx, source, indexer, searcher, config, exclusions }
+}
+
+function buildIndex(sessions: FixtureSession[], overrides: Record<string, unknown> = {}) {
+  return buildIndexFromDb(createSourceDb(sessions), overrides)
 }
 
 const NO_FILTER: Filters = {
@@ -854,9 +1155,31 @@ describe("indexing and search", () => {
     ])
     await indexer.backfill()
     expect(idx.query(`SELECT count(*) c FROM indexed_sessions`).get()).toEqual({ c: 2 })
-    src.run(`DELETE FROM session WHERE id='ses_y'`)
+    src.run(`DELETE FROM session_v2 WHERE id='ses_y'`)
     await indexer.backfill()
     expect(idx.query(`SELECT session_id FROM indexed_sessions`).all()).toEqual([{ session_id: "ses_x" }])
+  })
+
+  test("a legacy v1-only session is indexed through the union source", async () => {
+    const src = createSourceDb([
+      { id: "ses_new", messages: [{ role: "user", parts: [{ type: "text", text: "modernToken" }] }] },
+    ])
+    addV1Session(src, {
+      id: "ses_orphan",
+      messages: [
+        { role: "user", parts: [{ type: "text", text: "orphanLegacyToken" }] },
+        { role: "assistant", parts: [{ type: "tool", tool: "bash", title: "ls", output: "orphanToolToken" }] },
+      ],
+    })
+    const { indexer, searcher, idx } = buildIndexFromDb(src)
+    await indexer.backfill()
+    expect(idx.query(`SELECT count(*) c FROM indexed_sessions`).get()).toEqual({ c: 2 })
+    const hits = searcher.lexical("orphanLegacyToken", NO_FILTER)
+    expect(hits).toHaveLength(1)
+    expect(hits[0].session_id).toBe("ses_orphan")
+    // Snippets for legacy hits resolve through the v1 part table.
+    expect([...searcher.snippets(hits, "orphanLegacyToken").values()][0]).toContain("«orphanLegacyToken»")
+    expect(searcher.lexical("orphanToolToken", NO_FILTER)).toHaveLength(1)
   })
 
   test("excluded directories are never indexed and are purged with cached summaries", async () => {
@@ -889,7 +1212,11 @@ describe("indexing and search", () => {
       source,
       config,
       exclusions,
-      client: { session: {} },
+      sessions: {
+        create: async () => ({ id: "ses_worker" }),
+        get: async () => ({}),
+        generate: async () => ({ text: "" }),
+      },
       home: "/home/t",
       log: () => {},
     })
@@ -963,14 +1290,99 @@ describe("indexing and search", () => {
     }
   })
 
-  test("a missing source part degrades the snippet instead of throwing", async () => {
+  test("a missing source message degrades the snippet instead of throwing", async () => {
     const { indexer, searcher, src } = buildIndex([
       { id: "ses_g", messages: [{ role: "user", parts: [{ type: "text", text: "ghostToken" }] }] },
     ])
     await indexer.indexSession("ses_g")
     const hits = searcher.lexical("ghostToken", NO_FILTER)
-    src.run(`DELETE FROM part`)
+    src.run(`DELETE FROM session_message`)
     expect([...searcher.snippets(hits, "ghostToken").values()][0]).toContain("no longer available")
+  })
+})
+
+// ------------------------------------------------------------------ summarize
+
+describe("Summarizer", () => {
+  const stubSessions = (calls: { create: number; generate: number }, workerId = "ses_worker1"): SessionClient => ({
+    create: async () => {
+      calls.create++
+      return { id: workerId }
+    },
+    get: async ({ sessionID }) => {
+      if (sessionID !== workerId) throw new Error("session not found")
+      return {}
+    },
+    generate: async ({ prompt }) => {
+      calls.generate++
+      expect(prompt).toContain("TRANSCRIPT:")
+      return { text: "the digested summary" }
+    },
+  })
+
+  const build = () =>
+    buildIndex([
+      {
+        id: "ses_sum",
+        messages: [
+          { role: "user", parts: [{ type: "text", text: "how do we deploy?" }] },
+          { role: "assistant", parts: [{ type: "text", text: "with argocd, obviously" }] },
+        ],
+      },
+    ])
+
+  test("generates through a reusable worker session and caches the result", async () => {
+    const { idx, source, config, exclusions } = build()
+    const calls = { create: 0, generate: 0 }
+    const deps = { idx, source, config, exclusions, sessions: stubSessions(calls), home: "/home/t", log: () => {} }
+    const summarizer = new Summarizer(deps)
+    const s = source.session("ses_sum")!
+
+    const fresh = await summarizer.summarize(s, "", false)
+    expect(fresh.summary).toBe("the digested summary")
+    expect(fresh.cachedAt).toBeUndefined()
+    expect(calls).toEqual({ create: 1, generate: 1 })
+    // The worker session id is remembered in the sidecar for reuse across restarts.
+    expect(getMeta(idx, `summary_worker:${summarizer.modelTag}`)).toBe("ses_worker1")
+
+    const cached = await summarizer.summarize(s, "", false)
+    expect(cached.cachedAt).toBeGreaterThan(0)
+    expect(calls.generate).toBe(1)
+
+    // A different focus is a different cache key but reuses the same worker.
+    const focused = await summarizer.summarize(s, "what tool deploys?", false)
+    expect(focused.summary).toBe("the digested summary")
+    expect(calls).toEqual({ create: 1, generate: 2 })
+
+    // A second instance (fresh process) revalidates the stored worker instead of creating one.
+    const again = new Summarizer(deps)
+    await again.summarize(s, "", true)
+    expect(calls.create).toBe(1)
+  })
+
+  test("recreates the worker session when the stored one is gone", async () => {
+    const { idx, source, config, exclusions } = build()
+    const calls = { create: 0, generate: 0 }
+    setMeta(idx, `summary_worker:${summaryModelTag({ summary: { model: config.summary.model } })}`, "ses_deleted")
+    const summarizer = new Summarizer({
+      idx,
+      source,
+      config,
+      exclusions,
+      sessions: stubSessions(calls),
+      home: "/home/t",
+      log: () => {},
+    })
+    const r = await summarizer.summarize(source.session("ses_sum")!, "", false)
+    expect(r.summary).toBe("the digested summary")
+    expect(calls.create).toBe(1)
+    expect(getMeta(idx, `summary_worker:${summarizer.modelTag}`)).toBe("ses_worker1")
+  })
+
+  test("is unavailable without a session client", () => {
+    const { idx, source, config, exclusions } = build()
+    const summarizer = new Summarizer({ idx, source, config, exclusions, sessions: null, home: "/home/t", log: () => {} })
+    expect(summarizer.available).toBe(false)
   })
 })
 
