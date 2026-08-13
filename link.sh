@@ -14,9 +14,6 @@
 # A plugin may be both (callout ships a server half and a TUI half); each half
 # is linked independently.
 #
-# legacy-v1/ holds plugins still on the v1 plugin API. They are deliberately NOT
-# linked — v1 plugins do not load in OpenCode 2 and would only produce load
-# errors. Port one back into plugins/ if you want it.
 #
 # Skills:
 #   * Each skills/<name>/ is symlinked as a directory into <config>/skills/<name>.

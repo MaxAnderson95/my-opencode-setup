@@ -6,7 +6,7 @@ Personal [OpenCode](https://opencode.ai) plugins, skills, slash commands, and a 
 
 ## Requirements
 
-- **OpenCode 2** (the `opencode2` binary, `@opencode-ai/cli@next`); developed against `0.0.0-next-17403`. These plugins use the v2 plugin API and **do not load in OpenCode 1** — see [`legacy-v1/`](legacy-v1/) for the unported v1 originals.
+- **OpenCode 2** (the `opencode2` binary, `@opencode-ai/cli@next`); developed against `0.0.0-next-17403`. These plugins use the v2 plugin API and **do not load in OpenCode 1**.
 - **[Bun](https://bun.sh)** — resolves plugin dependencies (`bun install`) and is the runtime for several plugins (`bun:sqlite`, `Bun.spawn`).
 - Individual plugins/skills may need extra tools — see the **Requires / config** column in each table.
 
@@ -15,7 +15,6 @@ Personal [OpenCode](https://opencode.ai) plugins, skills, slash commands, and a 
 ```
 my-opencode-setup/
 ├── plugins/          One folder per plugin, each with its own package.json
-├── legacy-v1/        Plugins still on the v1 API — not linked, kept for reference
 ├── skills/           One folder per skill (SKILL.md)
 ├── themes/           Custom theme
 ├── link.sh           Symlinks the plugins and skills into your OpenCode config
@@ -65,19 +64,19 @@ Instruction sets the agent loads on demand. `link.sh` symlinks each `skills/<nam
 
 > `md2pdf` and `openusage` target specific local tools (a personal `md2pdf` CLI and the OpenUsage menu-bar app); they're only useful if you run those tools.
 
-## Legacy v1 plugins
+## Retired plugins
 
-[`legacy-v1/`](legacy-v1/) holds plugins still written against the OpenCode 1 plugin API. They are **not** linked by `link.sh`, because v1 plugins do not load in OpenCode 2. Each was retired when OpenCode 2 grew a native equivalent; they are kept so the behaviour can be compared and ported back if a native version falls short.
+Seven plugins were dropped in the OpenCode 2 port because v2 grew a native equivalent. They remain in git history (`d536794`) if any needs resurrecting.
 
-| Plugin | Retired because OpenCode 2 natively provides |
+| Plugin | Replaced by |
 |---|---|
 | `cache-stats/` | A per-turn token table with cache read/write and cache-bust detection (`debug.turn_tokens` in `cli.json`). |
 | `search-scope-guard/` | Path-scoped `external_directory` permissions, which gate out-of-project `glob`/`grep` by rule. |
 | `sensitive-file-guard/` | Ordered `permissions` rules on the `read` action (e.g. deny `**/.env`). The bash-pipeline and content-sniffing halves have no native equivalent. |
 | `stuck-watchdog/` | Provider-level retry with jittered backoff and `session.retry.scheduled` events. Hung-tool detection has no native equivalent. |
 | `tool-timing/` | Per-call durations recorded on the message and rendered in the timeline. |
-
-Two more were deleted outright rather than retired: `local-session-commands/` (OpenCode 2 ships native `/open` and `/delete` slash commands) and `subagent-model/` (the native `subagent` tool plus per-agent `model:` pinning covers it).
+| `local-session-commands/` | Native `/open` and `/delete` slash commands. |
+| `subagent-model/` | The native `subagent` tool plus per-agent `model:` pinning. |
 
 ## Theme
 
