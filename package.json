@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "oc-plugin-callout",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "main": "./callout.ts",
+  "exports": {
+    "./server": "./callout.ts",
+    "./tui": "./tui.tsx"
+  },
+  "engines": {
+    "opencode": ">=1.18.0 <2"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*",
+    "@opentui/core": "*",
+    "@opentui/solid": "*",
+    "solid-js": "*"
+  }
+}
