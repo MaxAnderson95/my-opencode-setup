@@ -15,6 +15,7 @@
   // TUI plugins. Replace /path/to/my-opencode-setup with wherever you cloned
   // the repo.
   "plugin": [
+    "file:///path/to/my-opencode-setup/plugins/callout",
     "file:///path/to/my-opencode-setup/plugins/cache-stats",
     "file:///path/to/my-opencode-setup/plugins/elapsed-timer",
     "file:///path/to/my-opencode-setup/plugins/tokens-per-sec",

@@ -22,13 +22,18 @@ CONFIG="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
 mkdir -p "$CONFIG/plugins"
 for dir in "$REPO"/plugins/*/; do
   name="$(basename "$dir")"
+  found=false
   if [ -f "$dir$name.ts" ]; then
     ln -sfn "$dir$name.ts" "$CONFIG/plugins/$name.ts"
     echo "plugin/server  $name.ts"
-  elif compgen -G "$dir"tui.* >/dev/null; then
+    found=true
+  fi
+  if compgen -G "$dir"tui.* >/dev/null; then
     ln -sfn "${dir%/}" "$CONFIG/plugins/$name"
     echo "plugin/tui     $name/   (add it to tui.jsonc's plugin[] array)"
-  else
+    found=true
+  fi
+  if [ "$found" = false ]; then
     echo "plugin/skip    $name (no <name>.ts or tui.* entrypoint)"
   fi
 done
