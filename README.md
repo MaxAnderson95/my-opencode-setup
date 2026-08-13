@@ -8,18 +8,18 @@ Every connected MCP server injects its tool schemas into the model's context on 
 
 ## How it works
 
-1. **Per-turn awareness.** Via `experimental.chat.system.transform`, it appends an "MCP servers" block to the system prompt listing each server as **Active** (connected) or **Available** (configured but disconnected), so the model always knows what exists and its live state.
+1. **Per-turn awareness.** Via `ctx.session.hook("context")`, it appends an "MCP servers" block to the system prompt listing each server as **Active** (connected) or **Available** (configured but disconnected), so the model always knows what exists and its live state.
 2. **Runtime toggles.** Two tools:
-   - **`mcp_enable(servers: string[])`** — connects one or more servers. When the tool call returns, the model can continue immediately and use the newly loaded tools without waiting for another user message (the toolset is rebuilt per request). Reports `needs_auth` (telling the user to run `opencode mcp auth <name>`) or `needs_client_registration` where relevant.
+   - **`mcp_enable(servers: string[])`** — connects one or more servers through the server's native `/api/mcp/{name}/connect` endpoint. When the tool call returns, the model can continue immediately and use the newly loaded tools without waiting for another user message (the toolset is rebuilt per request). Reports `needs_auth` (telling the user to run `opencode mcp auth <name>`) where relevant.
    - **`mcp_disable(servers: string[])`** — disconnects one or more servers to free their context.
 
 ## Always-on protection
 
-Servers configured with `enabled !== false` in your OpenCode config are treated as **always-on** and cannot be disabled by `mcp_disable` — set `"enabled": false` on a server in `opencode.jsonc` to make it lazy-toggleable.
+Servers configured without `"disabled": true` in your OpenCode config connect at startup and are treated as **always-on**; `mcp_disable` refuses to touch them. Set `"disabled": true` on a server in `opencode.jsonc` to make it lazy-toggleable (available-but-off until the model enables it).
 
 ## Requirements & configuration
 
-- No environment variables. It reads your existing OpenCode MCP config via the plugin client.
-- Configure which servers are lazy vs always-on through the standard `mcp` block in `opencode.jsonc` (`"enabled": false` ⇒ available-but-off, toggleable; otherwise always-on).
+- No environment variables. It reads MCP state and config from the hosting server's HTTP API, discovered through the local-service registration file (`$XDG_STATE_HOME/opencode/service.json`).
+- Configure which servers are lazy vs always-on through the standard `mcp.servers` block in `opencode.jsonc` (`"disabled": true` ⇒ available-but-off, toggleable; otherwise always-on).
 
-Verified against opencode 1.17.11 (plugin SDK 1.4.10).
+Verified against @opencode-ai/plugin 0.0.0-next-17403 (OpenCode v2 beta).
