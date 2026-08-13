@@ -10,7 +10,7 @@
     "./tui": "./tui.tsx"
   },
   "engines": {
-    "opencode": ">=1.18.0 <2"
+    "opencode": ">=2.0.0-0"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": "*",

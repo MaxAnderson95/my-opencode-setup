@@ -1,10 +1,7 @@
-// @ts-nocheck
 /** @jsxImportSource @opentui/solid */
-import type { TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui"
-import { createMemo, createSignal, Show } from "solid-js"
+import { Plugin } from "@opencode-ai/plugin/tui"
+import { createMemo, createSignal, For, Show } from "solid-js"
 import { readCallout, type CalloutState } from "./state"
-
-const id = "callout"
 
 function link(content: string): { href: string; label: string } | undefined {
   try {
@@ -20,53 +17,62 @@ function link(content: string): { href: string; label: string } | undefined {
   }
 }
 
-const tui: TuiPlugin = async (api) => {
-  const [values, setValues] = createSignal<Record<string, CalloutState | undefined>>({})
-  const sessions = new Set<string>()
+export default Plugin.define({
+  id: "callout",
+  setup(context) {
+    // The server half of this plugin writes per-session state files; the TUI
+    // runs in a separate process, so it polls those files rather than sharing
+    // memory. Only sessions whose sidebar actually rendered are polled.
+    const [values, setValues] = createSignal<Record<string, CalloutState | undefined>>({})
+    const sessions = new Set<string>()
 
-  const refresh = async () => {
-    for (const sessionID of sessions) {
-      const value = await readCallout(sessionID)
-      setValues((current) => ({ ...current, [sessionID]: value }))
+    const refresh = async () => {
+      for (const sessionID of sessions) {
+        const value = await readCallout(sessionID)
+        setValues((current) => ({ ...current, [sessionID]: value }))
+      }
     }
-  }
 
-  const timer = setInterval(() => void refresh(), 500)
-  api.lifecycle.onDispose(() => clearInterval(timer))
+    const timer = setInterval(() => void refresh(), 500)
 
-  api.slots.register({
-    order: 75,
-    slots: {
-      sidebar_content(ctx, props) {
-        sessions.add(props.session_id)
+    const release = context.ui.slot({
+      append: "sidebar.content",
+      render: (input) => {
+        sessions.add(input.sessionID)
         void refresh()
-        const value = createMemo(() => values()[props.session_id])
-        const target = createMemo(() => link(value()?.content ?? ""))
+        const warning = context.theme.text.feedback.warning.default
+        const value = createMemo(() => values()[input.sessionID])
+        const lines = createMemo(() =>
+          (value()?.content ?? "").split("\n").map((content) => ({ content, target: link(content.trim()) })),
+        )
 
         return (
           <Show when={value()}>
-            <box
-              border={["left"]}
-              borderColor={ctx.theme.current.warning}
-              paddingLeft={1}
-              flexDirection="column"
-            >
-              <text fg={ctx.theme.current.warning}>
+            <box border={["left"]} borderColor={warning} paddingLeft={1} flexDirection="column">
+              <text fg={warning}>
                 <b>Callout</b>
               </text>
-              <Show when={target()} fallback={<text fg={ctx.theme.current.text}>{value()!.content}</text>}>
-                <text fg={ctx.theme.current.text}>
-                  <a href={target()!.href}>{target()!.label}</a>
-                </text>
-              </Show>
+              <For each={lines()}>
+                {(line) => (
+                  <Show
+                    when={line.target}
+                    fallback={<text fg={context.theme.text.default}>{line.content || " "}</text>}
+                  >
+                    <text fg={context.theme.text.default}>
+                      <a href={line.target!.href}>{line.target!.label}</a>
+                    </text>
+                  </Show>
+                )}
+              </For>
             </box>
           </Show>
         )
       },
-    },
-  })
-}
+    })
 
-const plugin: TuiPluginModule & { id: string } = { id, tui }
-
-export default plugin
+    return () => {
+      clearInterval(timer)
+      release()
+    }
+  },
+})
