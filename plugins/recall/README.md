@@ -32,7 +32,7 @@ Lexical queries are safe against FTS5 operator injection (every token is quoted)
 
 **Every filter is applied inside the SQL**, never as a post-filter over a fixed top-N BM25 cut. For a term that is common across the corpus the best-ranked rows can all belong to sessions the filters exclude, and a post-filter would return nothing while matches exist.
 
-**Current-session handling:** hits from the calling session are excluded — the model can already see them — *except* hits from before the session's last compaction, which are included and labeled `← THIS session, before its last compaction`. That makes `recall_search` a recovery path for details lost to context compaction. The boundary is the latest assistant message with `summary = 1` in the source DB.
+**Current-session handling:** hits from the calling session are excluded — the model can already see them — *except* hits from before the session's last compaction, which are included and labeled `← THIS session, before its last compaction`. That makes `recall_search` a recovery path for details lost to context compaction. The boundary is the latest completed compaction message in the source DB.
 
 ### `recall_expand`
 
@@ -80,22 +80,22 @@ The **escalation rung**: summarizes an entire session — or answers a focused q
 Mechanics:
 
 - The transcript is compacted (collapsed tool one-liners, trimmed text) and middle-out truncated to a 300k-char budget — goals live at the start of a session, outcomes at the end, so the middle goes first.
-- The prompt runs in an **ephemeral worker session** via the server API with `tools: {"*": false}` (the worker model cannot call tools) and a purpose-built system prompt; the worker session is deleted afterwards and is never indexed by recall.
+- The prompt runs through `session.generate` — a stateless completion in the context of a **persistent, empty worker session** (one per model tag, created once and reused forever; its id is remembered in the sidecar). The worker carries the model selection and the hidden tool-less `recall-summarizer` agent; the transcript and instructions travel in the prompt, and generate never adds messages to the worker, so there is nothing to delete or index.
 - Results are **cached permanently** in the sidecar DB keyed by `(session_id, model, variant, focus)` and invalidated only if the source session's `time_updated` changes. Repeat calls are instant and free. Cached summaries survive an index reset.
-- **Batching**: `session_ids` runs up to 4 workers concurrently through a promise pool with per-session error isolation (one bad id yields one error block, not a failed batch), live progress in the tool title (`recall summarize: 3/8`), and in-flight dedupe so concurrent requests for the same session share one worker. Cancelling the tool call aborts in-flight workers (`ctx.abort`), which are still cleaned up.
+- **Batching**: `session_ids` runs up to 4 generations concurrently through a promise pool with per-session error isolation (one bad id yields one error block, not a failed batch), live progress in the tool title (`recall summarize: 3/8`), and in-flight dedupe so concurrent requests for the same session share one generation. A 3-minute timeout bounds each generation; the v2 tool context carries no abort signal, so cancelling the tool call no longer interrupts an in-flight generation.
 - Sizing: a 16-message session summarizes in ~9 s fresh, focused questions in ~2 s, cache hits in ~0 s. A batch's wall time ≈ its slowest session, not the sum: measured 51.7 s for a batch whose sequential sum was 88 s.
 
-The worker agent is only registered when summarization is enabled and the configured provider is present, so a machine without that provider does not get a hidden agent pointing at a model it cannot reach.
+The hidden worker agent is only registered when summarization is enabled; it pins no model of its own (each worker session carries its model explicitly), so it is inert on machines without the configured provider.
 
 ### `recall_status`
 
 Index health: sessions/chunks indexed, backfill progress, embedder state, summary-cache count, index size on disk, config source, process RSS. If recall failed to initialise, this is the **only** tool registered and it reports the reason — a silent disable leaves no way to diagnose from inside a session.
 
-## Background work is announced with toasts
+## Background work is announced
 
-Indexing is invisible by design, which is right for the steady state and wrong for the rare long operation: a schema reset followed by a full rebuild runs for twenty minutes with nothing on screen. recall posts TUI toasts through `client.tui.showToast`, gated so routine work stays silent:
+Indexing is invisible by design, which is right for the steady state and wrong for the rare long operation: a schema reset followed by a full rebuild runs for twenty minutes with nothing on screen. The v2 plugin API has no server-side toast surface (toasts belong to TUI plugins), so announcements currently land in `recall.log`, gated by the same policy so routine work stays silent:
 
-| Event | Toast |
+| Event | Announcement |
 |---|---|
 | Index reset (schema or embedding-model change) | info, with the reason and MB reclaimed |
 | Backfill of **< 25** sessions (the normal startup catch-up) | *nothing at all* |
@@ -104,14 +104,16 @@ Indexing is invisible by design, which is right for the steady state and wrong f
 | Backfill that hit errors | warning instead of success, pointing at `recall_status` |
 | First-ever embedding-model download | info on start, success when semantic search goes live |
 
-So a full rebuild produces six toasts spread over its runtime, a routine restart produces none, and a session going idle never produces one. Thresholds live under `notify` in the config; `RECALL_QUIET=1` or `notify.enabled: false` turns them off entirely.
+So a full rebuild produces six announcements spread over its runtime, a routine restart produces none, and a session going idle never produces one. Thresholds live under `notify` in the config; `RECALL_QUIET=1` or `notify.enabled: false` turns them off entirely.
 
-Toasts are fire-and-forget and never throw: headless runs (`opencode run`, scheduled jobs) have no TUI attached, and the call simply no-ops.
+Announcements are fire-and-forget and never throw. The announcer/policy split is kept so a visible channel (a TUI-plugin toast bridge) can be swapped in later without touching the policy.
 
 ## How it works
 
 ```
 ~/.local/share/opencode/opencode.db   (source of truth — opened READ-ONLY)
+        │  v2 tables (session_v2 + session_message) first; legacy v1 tables
+        │  (session/message/part) serve only sessions the migration left behind
         │  session.idle / session.deleted events + watermark backfill
         ▼
 ~/.local/share/opencode-recall/index.db   (sidecar index, WAL)
@@ -137,11 +139,11 @@ Toasts are fire-and-forget and never throw: headless runs (`opencode run`, sched
 recall.ts            plugin wiring and tool surface
 lib/config.ts        defaults, recall.json, env overrides
 lib/text.ts          pure helpers: chunking, segmentation, snippets, FTS query building
-lib/source.ts        everything that knows opencode's own schema
+lib/source.ts        everything that knows opencode's own schema (v2 primary, v1 fallback)
 lib/schema.ts        sidecar DDL, versioned migration, backfill lease
 lib/embedder.ts      lazy embedding subprocess client (+ a deterministic fake for tests)
 lib/embedder-worker.ts  isolated transformers.js / ONNX runtime
-lib/notify.ts        toast delivery and the policy for when to stay quiet
+lib/notify.ts        announcement delivery (to recall.log) and the policy for when to stay quiet
 lib/indexer.ts       index writer and backfill
 lib/search.ts        lexical branch, semantic branch, RRF fusion, snippet resolution
 lib/summarize.ts     ephemeral worker summarizer and its cache
@@ -152,7 +154,7 @@ recall.test.ts       bun test
 Modules take their dependencies as arguments rather than reaching for module state, which is what lets the ranking- and chunking-sensitive logic be tested against an in-memory database and a deterministic fake embedder.
 
 ```bash
-cd plugins/recall && bun test        # 83 tests
+cd plugins/recall && bun test        # 104 tests
 bunx tsc --noEmit -p tsconfig.json
 ```
 
@@ -187,7 +189,7 @@ Environment variables win over the file:
 | `RECALL_EMBED_MODEL` / `RECALL_EMBED_DIMS` | Embedding model (changing either forces a reindex) |
 | `RECALL_SUMMARY_MODEL` | `provider/model` or `provider/model/variant` |
 | `RECALL_DISABLE_SUMMARIZE=1` | Drop the fourth rung and its worker agent |
-| `RECALL_QUIET=1` | Suppress all background-work toasts |
+| `RECALL_QUIET=1` | Suppress all background-work announcements |
 
 `index.excludeDirectories` accepts absolute paths and `~/` paths. A configured directory and all of its descendants are excluded without matching similarly prefixed siblings. Changes are detected within five seconds: newly excluded sessions are removed from FTS, embeddings, metadata, and the summary cache; newly eligible sessions are picked up by backfill. A malformed config edit keeps the last valid exclusion policy active. Exclusion affects every recall tool, including direct transcript reads, but does not delete conversations from OpenCode's source database.
 
@@ -212,7 +214,7 @@ Measured on this machine (M-series Mac, 3,022 sessions, a 6.4 GB `opencode.db`):
 | | |
 |---|---|
 | Index on disk | **342 MB** (39,591 chunks, 286,729 FTS rows) |
-| Full rebuild | ~47 min, one time, in the background behind toasts |
+| Full rebuild | ~47 min, one time, in the background |
 | Lexical search | p50 2.4 ms · p95 16 ms |
 | Snippet rendering | p50 0.3 ms · p95 0.7 ms (8 hits, read from the source DB) |
 | Semantic search | p50 20 ms (dominated by embedding the query, not by the scan) |

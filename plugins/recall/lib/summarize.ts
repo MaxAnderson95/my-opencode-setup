@@ -1,6 +1,14 @@
 /**
  * The escalation rung: whole-session summarisation offloaded to a cheap worker
- * model in an ephemeral, tool-less session, cached permanently in the sidecar.
+ * model, cached permanently in the sidecar.
+ *
+ * Mechanism (v2): `session.generate` runs one stateless completion in the
+ * context of a session without mutating it. The summarizer keeps one empty,
+ * hidden worker session per model tag (created once, id remembered in the
+ * sidecar meta table, reused forever) whose only job is to carry the model
+ * selection and the tool-less summarizer agent; the transcript and the
+ * instructions travel in the prompt. Unlike the v1 flow there is nothing to
+ * delete afterwards — generate leaves the worker session empty.
  *
  * Summaries are generated lazily, only for sessions someone actually asks
  * about, and are invalidated only by the source session changing.
@@ -9,31 +17,51 @@ import type { Database } from "bun:sqlite"
 import type { Config, SummaryModel } from "./config.ts"
 import { summaryModelTag } from "./config.ts"
 import type { DirectoryExclusions } from "./exclusions.ts"
+import { getMeta, setMeta } from "./schema.ts"
 import type { Source, SessionRow } from "./source.ts"
-import { clean, fmtDate, middleOut, shortDir } from "./text.ts"
+import { fmtDate, middleOut, shortDir } from "./text.ts"
 
 export type SummaryResult = { summary: string; cachedAt?: number; secs?: number; messages?: number }
 
 export const WORKER_PREFIX = "recall-summarizer worker: "
 
-const SYSTEM_FOCUSED =
-  "You answer questions about a recorded OpenCode agent session transcript. Answer ONLY from the transcript. Be specific: name files, commands, ids, and decisions. If the transcript does not contain the answer, say so plainly. No preamble."
+/** Static system prompt for the hidden worker agent; the per-call instructions ride in the prompt. */
+export const WORKER_SYSTEM =
+  "You analyze recorded OpenCode agent session transcripts. Follow the task instructions in the user message exactly, and answer ONLY from the transcript provided. No preamble."
 
-const SYSTEM_GENERAL =
-  "You summarize recorded OpenCode agent session transcripts. Produce a tight summary structured as: Goal; What was done (bullets); Key decisions & why; Gotchas/discoveries; Final state; Loose ends. Be specific — name files, commands, and ids. At most 350 words. No preamble."
+const TASK_FOCUSED =
+  "Answer the question below using only the transcript. Be specific: name files, commands, ids, and decisions. If the transcript does not contain the answer, say so plainly."
+
+const TASK_GENERAL =
+  "Produce a tight summary of the transcript structured as: Goal; What was done (bullets); Key decisions & why; Gotchas/discoveries; Final state; Loose ends. Be specific — name files, commands, and ids. At most 350 words."
+
+/**
+ * The slice of the v2 plugin session API the summarizer needs. Structural so
+ * tests can stub it; `ctx.session` satisfies it directly.
+ */
+export type SessionClient = {
+  create(input: {
+    title?: string | null
+    agent?: string | null
+    model?: { id: string; providerID: string; variant?: string } | null
+  }): Promise<{ id: string }>
+  get(input: { sessionID: string }): Promise<unknown>
+  generate(input: { sessionID: string; prompt: string }): Promise<{ text: string }>
+}
 
 export type SummarizerDeps = {
   idx: Database
   source: Source
   config: Config
   exclusions: DirectoryExclusions
-  client: any
+  sessions: SessionClient | null
   home: string
   log: (...args: unknown[]) => void
 }
 
 export class Summarizer {
   private inFlight = new Map<string, Promise<SummaryResult>>()
+  private workers = new Map<string, Promise<string>>()
   readonly modelTag: string
 
   constructor(private d: SummarizerDeps) {
@@ -41,11 +69,46 @@ export class Summarizer {
   }
 
   get available(): boolean {
-    return this.d.config.summary.enabled && !!this.d.client?.session
+    return this.d.config.summary.enabled && this.d.sessions !== null
   }
 
   cachedCount(): number {
     return (this.d.idx.query(`SELECT count(*) c FROM summaries`).get() as { c: number }).c
+  }
+
+  /**
+   * The empty worker session that carries a model selection. One per model
+   * tag, created lazily, remembered across restarts in the sidecar meta table
+   * and re-verified against the server before reuse (it may have been deleted).
+   */
+  private workerSession(sessions: SessionClient, model: SummaryModel, modelTag: string): Promise<string> {
+    const pending = this.workers.get(modelTag)
+    if (pending) return pending
+    const acquire = (async () => {
+      const metaKey = `summary_worker:${modelTag}`
+      const stored = getMeta(this.d.idx, metaKey)
+      if (stored) {
+        try {
+          await sessions.get({ sessionID: stored })
+          return stored
+        } catch {
+          this.d.log("summarizer worker session gone, recreating", stored)
+        }
+      }
+      const created = await sessions.create({
+        title: `${WORKER_PREFIX}${modelTag}`,
+        agent: this.d.config.summary.agent,
+        model: { id: model.modelID, providerID: model.providerID, ...(model.variant ? { variant: model.variant } : {}) },
+      })
+      setMeta(this.d.idx, metaKey, created.id)
+      this.d.log("summarizer worker session created", modelTag, created.id)
+      return created.id
+    })()
+    this.workers.set(modelTag, acquire)
+    acquire.catch(() => {
+      if (this.workers.get(modelTag) === acquire) this.workers.delete(modelTag)
+    })
+    return acquire
   }
 
   /** Compact whole-session transcript, middle-out truncated to the char budget. */
@@ -102,68 +165,46 @@ export class Summarizer {
     model: SummaryModel,
     abort?: AbortSignal,
   ): Promise<SummaryResult> {
+    const sessions = this.d.sessions
+    if (!sessions) throw new Error("no opencode session client in this context")
     const cfg = this.d.config.summary
     const { text: transcript, messages } = this.transcript(s.id)
     if (!transcript) throw new Error("session has no transcript content")
-    const system = focus ? SYSTEM_FOCUSED : SYSTEM_GENERAL
-    const task = `${focus ? `QUESTION: ${focus}` : "Summarize this session."}\n\nSESSION: ${s.title} (${shortDir(s.directory, this.d.home)}, ${fmtDate(s.time_created)})\nTRANSCRIPT:\n${transcript}`
+    const prompt = [
+      focus ? TASK_FOCUSED : TASK_GENERAL,
+      "",
+      ...(focus ? [`QUESTION: ${focus}`, ""] : []),
+      `SESSION: ${s.title} (${shortDir(s.directory, this.d.home)}, ${fmtDate(s.time_created)})`,
+      "TRANSCRIPT:",
+      transcript,
+    ].join("\n")
 
     if (abort?.aborted) throw new Error("aborted")
     const t0 = performance.now()
-    const created = await this.d.client.session.create({ body: { title: `${WORKER_PREFIX}${s.id}` } })
-    const worker: string | undefined = created?.data?.id
-    if (!worker)
-      throw new Error(
-        `failed to create worker session: ${clean(JSON.stringify(created?.error ?? created ?? null), 300)}`,
+    const worker = await this.workerSession(sessions, model, modelTag)
+    const racers: Promise<{ text: string }>[] = [
+      sessions.generate({ sessionID: worker, prompt }),
+      Bun.sleep(cfg.timeoutMs).then(() => {
+        throw new Error(`summarizer timed out after ${cfg.timeoutMs / 1000}s`)
+      }),
+    ]
+    if (abort)
+      racers.push(
+        new Promise<never>((_, reject) =>
+          abort.addEventListener("abort", () => reject(new Error("aborted")), { once: true }),
+        ),
       )
-    try {
-      const racers: Promise<any>[] = [
-        this.d.client.session.prompt({
-          path: { id: worker },
-          body: {
-            agent: cfg.agent,
-            model: { providerID: model.providerID, modelID: model.modelID },
-            ...(model.variant ? { variant: model.variant } : {}),
-            system,
-            tools: { "*": false },
-            parts: [{ type: "text", text: task }],
-          },
-        }),
-        Bun.sleep(cfg.timeoutMs).then(() => {
-          throw new Error(`summarizer timed out after ${cfg.timeoutMs / 1000}s`)
-        }),
-      ]
-      if (abort)
-        racers.push(
-          new Promise<never>((_, reject) =>
-            abort.addEventListener("abort", () => reject(new Error("aborted")), { once: true }),
-          ),
-        )
-      const res: any = await Promise.race(racers)
-      if (res?.error) throw new Error(clean(JSON.stringify(res.error), 300))
-      const parts: any[] = res?.data?.parts ?? []
-      const summary = parts
-        .filter((p) => p.type === "text" && typeof p.text === "string")
-        .map((p) => p.text)
-        .join("\n")
-        .trim()
-      if (!summary) {
-        const err = res?.data?.info?.error
-        throw new Error(err ? clean(JSON.stringify(err), 300) : "summarizer returned no text")
-      }
-      if (this.d.exclusions.matches(s.directory)) throw new Error("session was excluded while summarization was running")
-      this.d.idx.run(
-        `INSERT INTO summaries(session_id,model,focus,time_updated,summary,created) VALUES (?,?,?,?,?,?)
-         ON CONFLICT(session_id,model,focus) DO UPDATE SET time_updated=excluded.time_updated,
-           summary=excluded.summary, created=excluded.created`,
-        [s.id, modelTag, focus, s.time_updated, summary, Date.now()],
-      )
-      return { summary, secs: (performance.now() - t0) / 1000, messages }
-    } finally {
-      void this.d.client.session
-        .delete({ path: { id: worker } })
-        .catch((e: unknown) => this.d.log("summarizer worker delete failed", worker, e))
-    }
+    const res = await Promise.race(racers)
+    const summary = res.text.trim()
+    if (!summary) throw new Error("summarizer returned no text")
+    if (this.d.exclusions.matches(s.directory)) throw new Error("session was excluded while summarization was running")
+    this.d.idx.run(
+      `INSERT INTO summaries(session_id,model,focus,time_updated,summary,created) VALUES (?,?,?,?,?,?)
+       ON CONFLICT(session_id,model,focus) DO UPDATE SET time_updated=excluded.time_updated,
+         summary=excluded.summary, created=excluded.created`,
+      [s.id, modelTag, focus, s.time_updated, summary, Date.now()],
+    )
+    return { summary, secs: (performance.now() - t0) / 1000, messages }
   }
 }
 

@@ -1,5 +1,5 @@
 /**
- * Toast notifications for recall's background work.
+ * Notifications for recall's background work.
  *
  * recall indexes silently, which is right for the steady state (a handful of
  * stale sessions at startup, a single session after each idle) but wrong for
@@ -8,6 +8,11 @@
  *
  * The gate below is the whole design: stay silent for routine work, speak up
  * only for runs big enough that a user would otherwise wonder.
+ *
+ * The v2 plugin API has no server-side toast surface (toasts belong to TUI
+ * plugins), so announcements currently land in recall.log via `logNotifier`.
+ * The announcer/policy split is kept so a visible channel can be swapped in
+ * without touching the policy.
  */
 
 export type ToastVariant = "info" | "success" | "warning" | "error"
@@ -23,28 +28,12 @@ export type Notify = (t: Toast) => void
 
 export const noopNotify: Notify = () => {}
 
-/**
- * Wraps the server client's toast endpoint. Never throws and never rejects:
- * headless runs (`opencode run`, scheduled jobs) have no TUI attached, and a
- * failed notification must not disturb indexing.
- */
-export function createNotifier(client: any, log: (...args: unknown[]) => void): Notify {
-  if (!client?.tui?.showToast) return noopNotify
+/** Routes announcements into recall's own log file. Never throws. */
+export function logNotifier(log: (...args: unknown[]) => void): Notify {
   return (t) => {
     try {
-      void Promise.resolve(
-        client.tui.showToast({
-          body: {
-            title: t.title ?? "recall",
-            message: t.message,
-            variant: t.variant ?? "info",
-            ...(t.duration ? { duration: t.duration } : {}),
-          },
-        }),
-      ).catch(() => {})
-    } catch (e) {
-      log("toast failed", e)
-    }
+      log(`[notify:${t.variant ?? "info"}] ${t.message}`)
+    } catch {}
   }
 }
 

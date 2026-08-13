@@ -1,10 +1,10 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "name": "oc-plugin-subagent-model",
+  "name": "oc-plugin-model-identity",
   "version": "0.1.0",
   "type": "module",
   "private": true,
-  "main": "./subagent-model.ts",
-  "engines": { "opencode": ">=1.17.5" },
+  "main": "./model-identity.ts",
+  "engines": { "opencode": ">=1.3.14" },
   "peerDependencies": { "@opencode-ai/plugin": "*" }
 }

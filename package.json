@@ -8,9 +8,15 @@
   "workspaces": ["plugins/*"],
   "dependencies": {
     "@huggingface/transformers": "^3.7.0",
-    "@opencode-ai/plugin": "^1.17.13"
+    "@opencode-ai/plugin": "0.0.0-next-17403"
   },
   "devDependencies": {
-    "@types/bun": "^1.3.14"
+    "@opencode-ai/theme": "0.0.0-next-17403",
+    "@opentui/core": "0.5.2",
+    "@opentui/keymap": "0.5.2",
+    "@opentui/solid": "0.5.2",
+    "@types/bun": "^1.3.14",
+    "solid-js": "^1.9.14",
+    "typescript": "^7.0.2"
   }
 }

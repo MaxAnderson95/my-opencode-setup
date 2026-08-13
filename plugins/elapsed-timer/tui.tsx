@@ -1,9 +1,6 @@
-// @ts-nocheck
 /** @jsxImportSource @opentui/solid */
-import type { TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui"
-import { Show, createMemo, createSignal } from "solid-js"
-
-const id = "elapsed-timer"
+import { Plugin } from "@opencode-ai/plugin/tui"
+import { Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js"
 
 function formatDuration(totalSeconds: number): string {
   if (totalSeconds < 60) return `${totalSeconds}s`
@@ -15,70 +12,74 @@ function formatDuration(totalSeconds: number): string {
   return mins === 0 ? `${hours}h` : `${hours}h ${mins}m`
 }
 
-const tui: TuiPlugin = async (api, options) => {
-  if (options && options.enabled === false) return
+export default Plugin.define({
+  id: "elapsed-timer",
+  setup(context) {
+    if (context.options.enabled === false) return
 
-  // Single top-level heartbeat. One interval for the whole plugin, not per
-  // slot invocation. createMemo inside the slot subscribes to this tick.
-  const [tick, setTick] = createSignal(0)
-  const heartbeat = setInterval(() => setTick((t) => t + 1), 1000)
-  api.lifecycle.onDispose(() => clearInterval(heartbeat))
-
-  // Busy-start times keyed by session, tracked at the plugin level from the
-  // event bus rather than inside the slot component. The TUI unmounts the
-  // prompt row (and this slot with it) whenever a permission or question
-  // prompt appears — including ones raised by subagent child sessions — so
-  // any state held in the slot's memos is wiped on every such blip. "retry"
-  // counts as still-running: provider retries shouldn't reset the timer.
-  const [starts, setStarts] = createSignal<Record<string, number>>({})
-  const offStatus = api.event.on("session.status", (event) => {
-    const { sessionID, status } = event.properties
-    setStarts((prev) => {
-      if (status.type === "idle") {
+    // Busy-start times are tracked at the plugin level from execution events,
+    // not inside the slot component: the host may unmount the prompt footer
+    // (permission prompts, route changes), and any state held in the slot's
+    // memos would be wiped on every such blip.
+    const [starts, setStarts] = createSignal<Record<string, number>>({})
+    const track = (sessionID: string) =>
+      setStarts((prev) => (sessionID in prev ? prev : { ...prev, [sessionID]: Date.now() }))
+    const untrack = (sessionID: string) =>
+      setStarts((prev) => {
         if (!(sessionID in prev)) return prev
         const next = { ...prev }
         delete next[sessionID]
         return next
-      }
-      if (sessionID in prev) return prev
-      return { ...prev, [sessionID]: Date.now() }
-    })
-  })
-  api.lifecycle.onDispose(offStatus)
+      })
 
-  api.slots.register({
-    slots: {
-      session_prompt_right(ctx, props) {
+    const offs = [
+      context.data.on("session.execution.started", (event) => track(event.data.sessionID)),
+      context.data.on("session.execution.succeeded", (event) => untrack(event.data.sessionID)),
+      context.data.on("session.execution.failed", (event) => untrack(event.data.sessionID)),
+      context.data.on("session.execution.interrupted", (event) => untrack(event.data.sessionID)),
+    ]
+
+    const release = context.ui.slot({
+      append: "prompt.footer.status",
+      render: (input) => {
         const busyStart = createMemo<number | undefined>((prev) => {
-          const tracked = starts()[props.session_id]
+          const sessionID = input.sessionID
+          if (!sessionID) return undefined
+          const tracked = starts()[sessionID]
           if (tracked !== undefined) return tracked
           // Fallback for a session already running when the TUI attached,
-          // before its first status event arrives.
-          const s = api.state.session.status(props.session_id)
-          if (s && s.type !== "idle") return prev ?? Date.now()
+          // before its first execution event arrives.
+          if (context.data.session.status(sessionID) === "running") return prev ?? Date.now()
           return undefined
         }, undefined)
 
+        // The heartbeat lives in the component and only while busy, so an
+        // idle TUI schedules no timers at all.
+        const [now, setNow] = createSignal(Date.now())
+        createEffect(() => {
+          if (busyStart() === undefined) return
+          setNow(Date.now())
+          const heartbeat = setInterval(() => setNow(Date.now()), 1000)
+          onCleanup(() => clearInterval(heartbeat))
+        })
+
         const elapsed = createMemo(() => {
-          tick()
           const start = busyStart()
           if (start === undefined) return 0
-          return Math.floor((Date.now() - start) / 1000)
+          return Math.max(0, Math.floor((now() - start) / 1000))
         })
 
         return (
           <Show when={busyStart() !== undefined}>
-            <text fg={ctx.theme.current.textMuted}>{formatDuration(elapsed())}</text>
+            <text fg={context.theme.text.subdued}>{formatDuration(elapsed())}</text>
           </Show>
         )
       },
-    },
-  })
-}
+    })
 
-const plugin: TuiPluginModule & { id: string } = {
-  id,
-  tui,
-}
-
-export default plugin
+    return () => {
+      for (const off of offs) off()
+      release()
+    }
+  },
+})
