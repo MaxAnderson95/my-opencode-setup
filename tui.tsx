@@ -1,31 +1,23 @@
-// @ts-nocheck
 /** @jsxImportSource @opentui/solid */
-import type { TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui"
+import { Plugin } from "@opencode-ai/plugin/tui"
 
-const id = "session-id-badge"
+export default Plugin.define({
+  id: "session-id-badge",
+  setup(context) {
+    if (context.options.enabled === false) return
 
-const tui: TuiPlugin = async (api, options) => {
-  if (options && options.enabled === false) return
+    const release = context.ui.slot({
+      append: "sidebar.content",
+      render: (input) => (
+        <box>
+          <text fg={context.theme.text.default}>
+            <b>Session</b>
+          </text>
+          <text fg={context.theme.text.subdued}>{input.sessionID}</text>
+        </box>
+      ),
+    })
 
-  api.slots.register({
-    slots: {
-      sidebar_content(ctx, props) {
-        return (
-          <box>
-            <text fg={ctx.theme.current.text}>
-              <b>Session</b>
-            </text>
-            <text fg={ctx.theme.current.textMuted}>{props.session_id}</text>
-          </box>
-        )
-      },
-    },
-  })
-}
-
-const plugin: TuiPluginModule & { id: string } = {
-  id,
-  tui,
-}
-
-export default plugin
+    return release
+  },
+})
