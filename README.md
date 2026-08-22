@@ -46,6 +46,7 @@ These use the [`@opentui/solid`](https://github.com/sst/opencode) JSX runtime an
 | `callout/` | Renders the current session's pinned callout in the sidebar (the display half of the `callout` server plugin). | — |
 | `elapsed-timer/` | Live session duration in the prompt footer while a session is working. | — |
 | `ghostty-progress/` | Drives Ghostty's OSC 9;4 progress-bar indicator while sessions work. Lives in the TUI because OpenCode 2's server runs detached from any terminal. | **Ghostty 1.2.0+** |
+| `session-delete/` | `/delete` slash command (and `Session > Delete session` in the palette) that deletes the session you're looking at, after a confirm that names it and counts its child sessions. | — |
 | `session-id-badge/` | Current session ID in the TUI sidebar. | — |
 | `tokens-per-sec/` | Live tokens-per-second with a sliding-window average, and a per-turn average once idle. | — |
 
@@ -66,7 +67,7 @@ Instruction sets the agent loads on demand. `link.sh` symlinks each `skills/<nam
 
 ## Retired plugins
 
-Seven plugins were dropped in the OpenCode 2 port because v2 grew a native equivalent. They remain in git history (`d536794`) if any needs resurrecting.
+Seven plugins were dropped in the OpenCode 2 port on the belief that v2 grew a native equivalent. They remain in git history (`d536794`) if any needs resurrecting — one already did.
 
 | Plugin | Replaced by |
 |---|---|
@@ -75,7 +76,7 @@ Seven plugins were dropped in the OpenCode 2 port because v2 grew a native equiv
 | `sensitive-file-guard/` | Ordered `permissions` rules on the `read` action (e.g. deny `**/.env`). The bash-pipeline and content-sniffing halves have no native equivalent. |
 | `stuck-watchdog/` | Provider-level retry with jittered backoff and `session.retry.scheduled` events. Hung-tool detection has no native equivalent. |
 | `tool-timing/` | Per-call durations recorded on the message and rendered in the timeline. |
-| `local-session-commands/` | Native `/open` and `/delete` slash commands. |
+| `local-session-commands/` | Nothing, as it turned out. Its `/delete` half is back as `session-delete/`: v2 only deletes sessions from inside the session-list dialog (`ctrl+d` twice), with no slash or palette command. Its `/open` half (macOS `open` on a path) is still gone — v2's native `/open` is the project picker, not the same thing. |
 | `subagent-model/` | The native `subagent` tool plus per-agent `model:` pinning. |
 
 ## Theme

@@ -104,6 +104,16 @@
         "@opencode-ai/plugin": "*",
       },
     },
+    "plugins/session-delete": {
+      "name": "oc-plugin-session-delete",
+      "version": "0.1.0",
+      "peerDependencies": {
+        "@opencode-ai/plugin": "*",
+        "@opentui/core": "*",
+        "@opentui/solid": "*",
+        "solid-js": "*",
+      },
+    },
     "plugins/session-id-badge": {
       "name": "oc-plugin-session-id-badge",
       "version": "0.1.0",
@@ -609,6 +619,8 @@
     "oc-plugin-presence": ["oc-plugin-presence@workspace:plugins/presence"],
 
     "oc-plugin-recall": ["oc-plugin-recall@workspace:plugins/recall"],
+
+    "oc-plugin-session-delete": ["oc-plugin-session-delete@workspace:plugins/session-delete"],
 
     "oc-plugin-session-id-badge": ["oc-plugin-session-id-badge@workspace:plugins/session-id-badge"],
 
