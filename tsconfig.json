@@ -14,5 +14,5 @@
     "verbatimModuleSyntax": true,
     "types": ["bun"]
   },
-  "include": ["tui.tsx"]
+  "include": ["tui.tsx", "tui.test.ts"]
 }

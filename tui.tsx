@@ -16,6 +16,21 @@ const KEEPALIVE_MS = 10_000
 // idempotent and cheap.
 const POLL_MS = 1_000
 
+interface TabProgress {
+  readonly active: boolean
+  readonly busy: boolean
+}
+
+export function displayedSessionBusy(
+  tabsEnabled: boolean,
+  tabs: readonly TabProgress[],
+  routedSessionID: string | undefined,
+  sessionBusy: (sessionID: string) => boolean,
+): boolean {
+  if (tabsEnabled) return tabs.find((tab) => tab.active)?.busy ?? false
+  return routedSessionID === undefined ? false : sessionBusy(routedSessionID)
+}
+
 export default Plugin.define({
   id: "ghostty-progress",
   setup(context) {
@@ -35,30 +50,23 @@ export default Plugin.define({
       }
     }
 
-    // In v1 this plugin ran in the per-terminal server, so "any busy session"
-    // meant "busy in this terminal". The v2 server is shared and detached, so
-    // mirroring every server session would light the bar for other terminals'
-    // work. Scope to what this TUI presents: its open tabs plus the routed
-    // session, expanded to session families so subagent activity counts.
-    const roots = () => {
-      const ids = new Set<string>()
-      const route = context.ui.router.current()
-      if (route.type === "session") ids.add(context.data.session.root(route.sessionID))
-      if (context.ui.tabs.enabled()) {
-        for (const tab of context.ui.tabs.list()) ids.add(tab.sessionID)
-      }
-      return ids
-    }
-
-    // data.session.status is "running" from session.execution.started until
-    // succeeded/failed/interrupted, which spans v1's busy and retry states.
-    const busyNow = () => {
-      for (const root of roots()) {
-        for (const id of context.data.session.family(root)) {
-          if (context.data.session.status(id) === "running") return true
-        }
+    const sessionBusy = (sessionID: string) => {
+      const root = context.data.session.root(sessionID)
+      const family = context.data.session.family(root)
+      for (const id of family.length > 0 ? family : [root]) {
+        if (context.data.session.status(id) === "running") return true
       }
       return false
+    }
+
+    const busyNow = () => {
+      const route = context.ui.router.current()
+      return displayedSessionBusy(
+        context.ui.tabs.enabled(),
+        context.ui.tabs.list(),
+        route.type === "session" ? route.sessionID : undefined,
+        sessionBusy,
+      )
     }
 
     let busy = false
