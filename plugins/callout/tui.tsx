@@ -1,7 +1,38 @@
 /** @jsxImportSource @opentui/solid */
 import { Plugin } from "@opencode-ai/plugin/tui"
-import { createMemo, createSignal, For, Show } from "solid-js"
+import { createMemo, createSignal, For, Match, Show, Switch } from "solid-js"
 import { readCallout, type CalloutState } from "./state"
+
+type Segment = {
+  text: string
+  bold?: boolean
+  italic?: boolean
+  code?: boolean
+}
+
+// Deliberately narrow inline markdown: bold, italic, and code spans, no
+// nesting. Underscores are not delimiters so identifiers, paths, and branch
+// names survive unstyled.
+const inline = /\*\*(\S(?:[^*]*\S)?)\*\*|\*(\S(?:[^*]*\S)?)\*|`([^`]+)`/g
+
+function segments(content: string): Segment[] {
+  const result: Segment[] = []
+  let index = 0
+
+  for (const match of content.matchAll(inline)) {
+    if (match.index > index) result.push({ text: content.slice(index, match.index) })
+
+    const [matched, bold, italic, code] = match
+    if (bold) result.push({ text: bold, bold: true })
+    else if (italic) result.push({ text: italic, italic: true })
+    else if (code) result.push({ text: code, code: true })
+
+    index = match.index + matched.length
+  }
+
+  if (index < content.length) result.push({ text: content.slice(index) })
+  return result
+}
 
 function link(content: string): { href: string; label: string } | undefined {
   try {
@@ -43,7 +74,9 @@ export default Plugin.define({
         const warning = context.theme.text.feedback.warning.default
         const value = createMemo(() => values()[input.sessionID])
         const lines = createMemo(() =>
-          (value()?.content ?? "").split("\n").map((content) => ({ content, target: link(content.trim()) })),
+          (value()?.content ?? "")
+            .split("\n")
+            .map((content) => ({ content, target: link(content.trim()), segments: segments(content) })),
         )
 
         return (
@@ -56,7 +89,27 @@ export default Plugin.define({
                 {(line) => (
                   <Show
                     when={line.target}
-                    fallback={<text fg={context.theme.text.default}>{line.content || " "}</text>}
+                    fallback={
+                      <text fg={context.theme.text.default}>
+                        <Show when={line.content} fallback=" ">
+                          <For each={line.segments}>
+                            {(segment) => (
+                              <Switch fallback={segment.text}>
+                                <Match when={segment.bold}>
+                                  <b>{segment.text}</b>
+                                </Match>
+                                <Match when={segment.italic}>
+                                  <i>{segment.text}</i>
+                                </Match>
+                                <Match when={segment.code}>
+                                  <span style={{ fg: context.theme.markdown.code }}>{segment.text}</span>
+                                </Match>
+                              </Switch>
+                            )}
+                          </For>
+                        </Show>
+                      </text>
+                    }
                   >
                     <text fg={context.theme.text.default}>
                       <a href={line.target!.href}>{line.target!.label}</a>
