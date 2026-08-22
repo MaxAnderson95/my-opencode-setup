@@ -6,8 +6,12 @@ export default Plugin.define({
   setup(context) {
     if (context.options.enabled === false) return
 
+    // `prepend` — not `append` — because sidebar.content orders its claims by
+    // plugin enable order, and the host seeds the Context and MCP builtins
+    // before any discovered plugin. Appending therefore lands below MCP; the
+    // v1 API's numeric `order` that used to place this mid-sidebar is gone.
     const release = context.ui.slot({
-      append: "sidebar.content",
+      prepend: "sidebar.content",
       render: (input) => (
         <box>
           <text fg={context.theme.text.default}>
