@@ -15,14 +15,14 @@ export default Plugin.define({
       tools.add({
         name: "callout",
         description:
-          "Put important information in the user's OpenCode sidebar for the current session. Use for critical findings, created PR URLs, blockers, or other information that should remain visible. For multiple related items, prefer a concise bulleted list and put each URL on its own line so it remains independently clickable. Each content call replaces the previous callout; use clear=true to remove it.",
+          "Put important information in the user's OpenCode sidebar for the current session. Use for critical findings, created PR URLs, blockers, or other information that should remain visible. For multiple related items, prefer a concise bulleted list and put each URL on its own line so it remains independently clickable. Inline **bold**, *italic*, and `code` are rendered; other markdown is shown literally. Each content call replaces the previous callout; use clear=true to remove it.",
         input: {
           type: "object",
           properties: {
             content: {
               type: "string",
               description:
-                "Concise text or URLs to display. Prefer bullets for multiple items, with each URL on its own line. Replaces the existing callout.",
+                "Concise text or URLs to display. Prefer bullets for multiple items, with each URL on its own line. Supports inline **bold**, *italic*, and `code`. Replaces the existing callout.",
             },
             clear: {
               type: "boolean",
