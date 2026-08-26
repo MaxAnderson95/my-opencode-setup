@@ -18,6 +18,26 @@
         "typescript": "^7.0.2",
       },
     },
+    "plugins/active-provider-account": {
+      "name": "oc-plugin-active-provider-account",
+      "version": "0.1.0",
+      "peerDependencies": {
+        "@opencode-ai/plugin": "*",
+        "@opentui/core": "*",
+        "@opentui/solid": "*",
+        "solid-js": "*",
+      },
+    },
+    "plugins/background-jobs": {
+      "name": "oc-plugin-background-jobs",
+      "version": "0.1.0",
+      "peerDependencies": {
+        "@opencode-ai/plugin": "*",
+        "@opentui/core": "*",
+        "@opentui/solid": "*",
+        "solid-js": "*",
+      },
+    },
     "plugins/caffeinate": {
       "name": "oc-plugin-caffeinate",
       "version": "0.1.0",
@@ -104,6 +124,16 @@
         "@opencode-ai/plugin": "*",
       },
     },
+    "plugins/session-close": {
+      "name": "oc-plugin-session-close",
+      "version": "0.1.0",
+      "peerDependencies": {
+        "@opencode-ai/plugin": "*",
+        "@opentui/core": "*",
+        "@opentui/solid": "*",
+        "solid-js": "*",
+      },
+    },
     "plugins/session-delete": {
       "name": "oc-plugin-session-delete",
       "version": "0.1.0",
@@ -122,6 +152,13 @@
         "@opentui/core": "*",
         "@opentui/solid": "*",
         "solid-js": "*",
+      },
+    },
+    "plugins/subagent-model": {
+      "name": "oc-plugin-subagent-model",
+      "version": "0.1.0",
+      "peerDependencies": {
+        "@opencode-ai/plugin": "*",
       },
     },
     "plugins/tokens-per-sec": {
@@ -598,6 +635,10 @@
 
     "object-keys": ["object-keys@1.1.1", "", {}, "sha512-NuAESUOUMrlIXOfHKzD6bpPu3tYt3xvjNdRIQ+FeT0lNb4K8WR70CaDxhuNguS2XG+GjkyMwOzsN5ZktImfhLA=="],
 
+    "oc-plugin-active-provider-account": ["oc-plugin-active-provider-account@workspace:plugins/active-provider-account"],
+
+    "oc-plugin-background-jobs": ["oc-plugin-background-jobs@workspace:plugins/background-jobs"],
+
     "oc-plugin-caffeinate": ["oc-plugin-caffeinate@workspace:plugins/caffeinate"],
 
     "oc-plugin-callout": ["oc-plugin-callout@workspace:plugins/callout"],
@@ -620,9 +661,13 @@
 
     "oc-plugin-recall": ["oc-plugin-recall@workspace:plugins/recall"],
 
+    "oc-plugin-session-close": ["oc-plugin-session-close@workspace:plugins/session-close"],
+
     "oc-plugin-session-delete": ["oc-plugin-session-delete@workspace:plugins/session-delete"],
 
     "oc-plugin-session-id-badge": ["oc-plugin-session-id-badge@workspace:plugins/session-id-badge"],
+
+    "oc-plugin-subagent-model": ["oc-plugin-subagent-model@workspace:plugins/subagent-model"],
 
     "oc-plugin-tokens-per-sec": ["oc-plugin-tokens-per-sec@workspace:plugins/tokens-per-sec"],
 
