@@ -44,9 +44,11 @@ These use the [`@opentui/solid`](https://github.com/sst/opencode) JSX runtime an
 | Plugin | Description | Requires |
 |---|---|---|
 | `active-provider-account/` | Shows active credential labels in the sidebar for providers with multiple saved accounts. | — |
+| `background-jobs/` | Active background tools and subagents in the current session's sidebar, with elapsed time. | — |
 | `callout/` | Renders the current session's pinned callout in the sidebar (the display half of the `callout` server plugin). | — |
 | `elapsed-timer/` | Live session duration in the prompt footer while a session is working. | — |
 | `ghostty-progress/` | Drives Ghostty's OSC 9;4 progress-bar indicator while sessions work. Lives in the TUI because OpenCode 2's server runs detached from any terminal. | **Ghostty 1.2.0+** |
+| `session-close/` | `/close` slash command (and `Session > Close session tab` in the palette) that closes the current tab without deleting its session, then opens a fresh session tab. | Session tabs enabled |
 | `session-delete/` | `/delete` slash command (and `Session > Delete session` in the palette) that deletes the session you're looking at, after a confirm that names it and counts its child sessions. | — |
 | `session-id-badge/` | Current session ID in the TUI sidebar. | — |
 | `tokens-per-sec/` | Live tokens-per-second with a sliding-window average, and a per-turn average once idle. | — |
