@@ -43,6 +43,7 @@ These use the [`@opentui/solid`](https://github.com/sst/opencode) JSX runtime an
 
 | Plugin | Description | Requires |
 |---|---|---|
+| `active-provider-account/` | Shows active credential labels in the sidebar for providers with multiple saved accounts. | — |
 | `callout/` | Renders the current session's pinned callout in the sidebar (the display half of the `callout` server plugin). | — |
 | `elapsed-timer/` | Live session duration in the prompt footer while a session is working. | — |
 | `ghostty-progress/` | Drives Ghostty's OSC 9;4 progress-bar indicator while sessions work. Lives in the TUI because OpenCode 2's server runs detached from any terminal. | **Ghostty 1.2.0+** |
