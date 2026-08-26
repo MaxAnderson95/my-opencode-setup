@@ -36,6 +36,7 @@ Top-level-only applies to *discovery* of that entry file, not to what it may imp
 | [`message-timestamps/`](plugins/message-timestamps/README.md) | Gives the model a clock: stamps every user message with local time (plus idle gap and previous-turn duration when they matter) and selectively stamps slow tool results, without breaking prompt caching. | Optional `OPENCODE_MESSAGE_TIMESTAMP*` env overrides. |
 | [`recall/`](plugins/recall/README.md) | Long-term conversational memory: hybrid lexical (FTS5/BM25) + semantic (local transformers.js embeddings) search over every past OpenCode conversation. An escalation ladder of tools: `recall_search` (find sessions) / `recall_inspect` (search within one, or outline it) / `recall_expand` (read transcript) / `recall_summarize` (delegate to a cheap worker model, cached permanently) / `recall_status`. Announces long background indexing via TUI toasts and stays silent for routine catch-up. The only multi-file plugin here (`lib/` + `bun test`). | One-time ~33 MB model download; reads the OpenCode DB read-only. Optional `~/.config/opencode/recall.json`. |
 | `model-identity/` | Stamps each user message with the resolved model and reasoning effort (`<model-slug>` / `<model-effort>`), so the model knows what it is. | — |
+| `subagent-model/` | Adds an optional per-invocation `model` override to the native `subagent` tool while retaining native child sessions, jobs, and TUI rendering. | — |
 
 ## TUI plugins
 
@@ -80,7 +81,7 @@ Seven plugins were dropped in the OpenCode 2 port on the belief that v2 grew a n
 | `stuck-watchdog/` | Provider-level retry with jittered backoff and `session.retry.scheduled` events. Hung-tool detection has no native equivalent. |
 | `tool-timing/` | Per-call durations recorded on the message and rendered in the timeline. |
 | `local-session-commands/` | Nothing, as it turned out. Its `/delete` half is back as `session-delete/`: v2 only deletes sessions from inside the session-list dialog (`ctrl+d` twice), with no slash or palette command. Its `/open` half (macOS `open` on a path) is still gone — v2's native `/open` is the project picker, not the same thing. |
-| `subagent-model/` | The native `subagent` tool plus per-agent `model:` pinning. |
+| `subagent-model/` | Resurrected below: per-invocation model selection was still missing from the native `subagent` tool. |
 
 ## Theme
 
