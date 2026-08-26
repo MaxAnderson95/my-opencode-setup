@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "oc-plugin-background-jobs",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "exports": {
+    "./tui": "./tui.tsx"
+  },
+  "engines": {
+    "opencode": ">=2.0.0-0"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*",
+    "@opentui/core": "*",
+    "@opentui/solid": "*",
+    "solid-js": "*"
+  }
+}
