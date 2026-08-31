@@ -11,6 +11,14 @@ type BackgroundJob = {
   sessionID?: string
 }
 
+const MAX_TITLE_LENGTH = 80
+
+function backgroundJobTitle(value: string) {
+  const title = value.replace(/\s+/g, " ").trim()
+  if (title.length <= MAX_TITLE_LENGTH) return title
+  return `${title.slice(0, MAX_TITLE_LENGTH - 3).trimEnd()}...`
+}
+
 function text(value: unknown) {
   return typeof value === "string" ? value : undefined
 }
@@ -49,7 +57,7 @@ export default Plugin.define({
               (shell): BackgroundJob => ({
                 id: shell.id,
                 tool: "shell",
-                title: shell.command,
+                title: backgroundJobTitle(shell.command),
                 started: shell.time.started,
               }),
             )
@@ -66,12 +74,13 @@ export default Plugin.define({
                 return {
                   id: item.id,
                   tool: item.name,
-                  title:
+                  title: backgroundJobTitle(
                     text(state.metadata?.title) ??
                     text(state.input.description) ??
                     text(state.input.command) ??
                     text(state.input.prompt) ??
                     item.name,
+                  ),
                   started: item.time.ran ?? item.time.created,
                   sessionID,
                 }
