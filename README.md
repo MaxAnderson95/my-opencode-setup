@@ -23,9 +23,9 @@ my-opencode-setup/
 
 ## Server plugins
 
-Regular plugins that hook OpenCode's event/tool system. OpenCode auto-discovers them by scanning `plugins/*.{ts,js}` (**top-level files only**, but it follows symlinks), so each is symlinked into `~/.config/opencode/plugins/<name>.ts` pointing at the folder's inner source file.
+Regular plugins that hook OpenCode's event/tool system. Server-only plugins use OpenCode's top-level `plugins/*.{ts,js}` discovery. Plugins that also have a TUI entrypoint use the package-directory layout described below.
 
-Top-level-only applies to *discovery* of that entry file, not to what it may import: Bun resolves relative specifiers against a module's real path, so a plugin can split into a `lib/` folder and still be found. `recall/` does exactly that.
+Top-level-only applies to discovery of a server-only entry file, not to what it may import. Bun resolves relative specifiers against a module's real path, so a plugin can split into a `lib/` folder and still be found. `recall/` does exactly that.
 
 | Plugin | Description | Requires / config |
 |---|---|---|
@@ -40,7 +40,7 @@ Top-level-only applies to *discovery* of that entry file, not to what it may imp
 
 ## TUI plugins
 
-These use the [`@opentui/solid`](https://github.com/sst/opencode) JSX runtime and claim slots in the TUI's layout. OpenCode 2 auto-scans `<config>/plugins/tui/` for `*.{ts,tsx,js,jsx}` (symlinks included), so `link.sh` symlinks the inner `tui.tsx` there. No config entry is needed — v1's `tui.jsonc` `plugin[]` array is gone.
+These use the [`@opentui/solid`](https://github.com/sst/opencode) JSX runtime and claim slots in the TUI's layout. Each package has an `index.ts` server entrypoint beside `tui.tsx`. `link.sh` symlinks the package directory into `<config>/plugins/<name>`, allowing the server to advertise the TUI entrypoint to connected clients. No `cli.json` entry is needed.
 
 | Plugin | Description | Requires |
 |---|---|---|
@@ -52,7 +52,6 @@ These use the [`@opentui/solid`](https://github.com/sst/opencode) JSX runtime an
 | `session-close/` | `/close` slash command (and `Session > Close session tab` in the palette) that closes the current tab without deleting its session, then opens a fresh session tab. | Session tabs enabled |
 | `session-delete/` | `/delete` slash command (and `Session > Delete session` in the palette) that deletes the session you're looking at, after a confirm that names it and counts its child sessions. | — |
 | `session-id-badge/` | Current session ID in the TUI sidebar. | — |
-| `tokens-per-sec/` | Live tokens-per-second with a sliding-window average, and a per-turn average once idle. | — |
 
 ## Skills
 
@@ -100,10 +99,10 @@ bun install            # resolves @opencode-ai/plugin, transformers.js, etc.
 
 `link.sh` handles each kind automatically, and is idempotent:
 
-- **Server plugins** → symlinks the inner file, e.g. `plugins/recall/recall.ts` → `~/.config/opencode/plugins/recall.ts`. Required because the loader's auto-scan matches only top-level `plugins/*.{ts,js}` — symlinking the whole `plugins/` directory would leave the nested server plugins undiscovered.
-- **TUI plugins** → symlinks the inner entrypoint, e.g. `plugins/elapsed-timer/tui.tsx` → `~/.config/opencode/plugins/tui/elapsed-timer.tsx`.
+- **Server-only plugins** → symlinks the inner file, e.g. `plugins/recall/recall.ts` → `~/.config/opencode/plugins/recall.ts`.
+- **Plugins with a TUI entrypoint** → symlinks the package directory, e.g. `plugins/elapsed-timer` → `~/.config/opencode/plugins/elapsed-timer`. OpenCode loads `index.ts` on the server and its sibling `tui.tsx` in connected terminal clients.
 - **Skills** → symlinks the directory, e.g. `skills/opencode-db-querying` → `~/.config/opencode/skills/opencode-db-querying`.
-- **Upgrading from v1** → removes stale directory symlinks left by the old layout. That matters: a leftover `plugins/callout/` still resolves under OpenCode 2's package discovery and would load the v1 source alongside its v2 replacement.
+- **Upgrading** → removes links from the retired flat TUI layout before creating current links.
 
 Then set the theme in `cli.json` (see [`cli.example.json`](cli.example.json)) and symlink it:
 
@@ -113,11 +112,11 @@ ln -s "$PWD/themes/ayu-max-custom.json" ~/.config/opencode/themes/ayu-max-custom
 
 ## How plugins load (for adapters)
 
-OpenCode 2 discovers **server plugins** two ways: an explicit entry in `opencode.jsonc`'s `plugins[]` (a `file://` path, npm spec, or `{ "package": …, "options": … }` object), or the auto-scan of `{plugin,plugins}/*.{ts,js}` (top-level files only, follows symlinks). It also loads a child *directory* as a package when that directory has a string `main`/`module`/`exports` or an `index.ts|js` — which is why stale v1 directory symlinks are actively harmful rather than merely inert.
+OpenCode 2 discovers **server plugins** from an explicit entry in `opencode.jsonc`'s `plugins[]`, top-level `{plugin,plugins}/*.{ts,js}` files, or immediate package directories containing `index.ts` or `index.js`. Configured local paths must name a directory, not an entrypoint file.
 
-**TUI plugins** are auto-scanned separately from `<config>/plugins/tui/`, matching `*.{ts,tsx,js,jsx}` including symlinks. The v1 mechanism (a `./tui` export listed in `tui.jsonc`) is gone; `tui.json(c)` is migrated once into `cli.json` on first run.
+**TUI plugins** load from `tui.*` beside a package's `index.*`. A connected TUI receives this capability from the active server plugin list. CLI-only packages can instead be configured as directories in `cli.json`.
 
-That's why server plugins here are folders in the repo but symlinked by their **inner file**: the folder gives each plugin its own `package.json` (name, `main`, `engines`, peer deps) while the inner-file symlink keeps the auto-scan working. Passing options to a plugin requires listing it explicitly in `opencode.jsonc` with the object form; the plugin reads them from `ctx.options`.
+Passing options to a plugin requires listing its directory explicitly in `opencode.jsonc` with the object form; the plugin reads them from `ctx.options`.
 
 ## License
 

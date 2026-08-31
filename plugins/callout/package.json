@@ -4,9 +4,10 @@
   "version": "0.1.0",
   "type": "module",
   "private": true,
-  "main": "./callout.ts",
+  "main": "./index.ts",
   "exports": {
-    "./server": "./callout.ts",
+    ".": "./index.ts",
+    "./server": "./index.ts",
     "./tui": "./tui.tsx"
   },
   "engines": {

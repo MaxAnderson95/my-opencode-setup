@@ -161,16 +161,6 @@
         "@opencode-ai/plugin": "*",
       },
     },
-    "plugins/tokens-per-sec": {
-      "name": "oc-plugin-tokens-per-sec",
-      "version": "0.4.0",
-      "peerDependencies": {
-        "@opencode-ai/plugin": "*",
-        "@opentui/core": "*",
-        "@opentui/solid": "*",
-        "solid-js": "*",
-      },
-    },
   },
   "packages": {
     "@ai-sdk/provider": ["@ai-sdk/provider@3.0.8", "", { "dependencies": { "json-schema": "^0.4.0" } }, "sha512-oGMAgGoQdBXbZqNG0Ze56CHjDZ1IDYOwGYxYjO5KLSlz5HiNQ9udIXsPZ61VWaHGZ5XW/jyjmr6t2xz2jGVwbQ=="],
@@ -668,8 +658,6 @@
     "oc-plugin-session-id-badge": ["oc-plugin-session-id-badge@workspace:plugins/session-id-badge"],
 
     "oc-plugin-subagent-model": ["oc-plugin-subagent-model@workspace:plugins/subagent-model"],
-
-    "oc-plugin-tokens-per-sec": ["oc-plugin-tokens-per-sec@workspace:plugins/tokens-per-sec"],
 
     "onnxruntime-common": ["onnxruntime-common@1.21.0", "", {}, "sha512-Q632iLLrtCAVOTO65dh2+mNbQir/QNTVBG3h/QdZBpns7mZ0RYbLRBgGABPbpU9351AgYy7SJf1WaeVwMrBFPQ=="],
 

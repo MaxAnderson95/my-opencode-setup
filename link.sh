@@ -3,17 +3,9 @@
 # link.sh — symlink this repo's plugins and skills into your OpenCode config.
 #
 # Plugins (two kinds, linked differently):
-#   * Server plugins — the loader auto-scans plugins/*.{ts,js} (top-level files
-#     only, follows symlinks), so we symlink the inner source file
-#     (plugins/<name>/<name>.ts -> <config>/plugins/<name>.ts).
-#   * TUI plugins    — OpenCode 2 auto-scans <config>/plugins/tui/ for
-#     *.{ts,tsx,js,jsx} (symlinks included), so we symlink the inner entrypoint
-#     (plugins/<name>/tui.tsx -> <config>/plugins/tui/<name>.tsx). No config
-#     entry is needed; v1's tui.jsonc plugin[] array is gone.
-#
-# A plugin may be both (callout ships a server half and a TUI half); each half
-# is linked independently.
-#
+#   * Server-only plugins use the loader's top-level *.ts discovery.
+#   * Plugins with a TUI entrypoint are linked as package directories containing
+#     index.ts and tui.*, allowing the server to advertise the TUI feature.
 #
 # Skills:
 #   * Each skills/<name>/ is symlinked as a directory into <config>/skills/<name>.
@@ -24,19 +16,23 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
 
-# --- migrate away from the v1 layout ---
-# v1 linked TUI plugins as directory symlinks (<config>/plugins/<name>). Those
-# still resolve under OpenCode 2's package discovery, so a leftover one loads the
-# v1 source alongside its v2 replacement. Only symlinks pointing back into this
-# repo are removed, so unrelated entries are left alone.
+# --- remove links from retired plugin layouts ---
 mkdir -p "$CONFIG/plugins" "$CONFIG/plugins/tui"
 for link in "$CONFIG"/plugins/*; do
   [ -L "$link" ] || continue
   case "$(readlink "$link")" in
     "$REPO"/plugins/*)
-      [ -d "$link" ] || continue
       rm -f "$link"
-      echo "unlink/v1      $(basename "$link")/ (stale v1 directory symlink)"
+      echo "unlink/stale   $(basename "$link")"
+      ;;
+  esac
+done
+for link in "$CONFIG"/plugins/tui/*; do
+  [ -L "$link" ] || continue
+  case "$(readlink "$link")" in
+    "$REPO"/plugins/*)
+      rm -f "$link"
+      echo "unlink/stale   tui/$(basename "$link")"
       ;;
   esac
 done
@@ -44,21 +40,21 @@ done
 # --- plugins ---
 for dir in "$REPO"/plugins/*/; do
   name="$(basename "$dir")"
-  found=false
+  for entry in "$dir"tui.tsx "$dir"tui.ts "$dir"tui.jsx "$dir"tui.js; do
+    if [ -f "$entry" ]; then
+      if [ ! -f "$dir/index.ts" ] && [ ! -f "$dir/index.js" ]; then
+        echo "plugin/skip    $name (tui.* requires index.ts or index.js)"
+        continue 2
+      fi
+      ln -sfn "${dir%/}" "$CONFIG/plugins/$name"
+      echo "plugin/package $name/"
+      continue 2
+    fi
+  done
   if [ -f "$dir$name.ts" ]; then
     ln -sfn "$dir$name.ts" "$CONFIG/plugins/$name.ts"
     echo "plugin/server  $name.ts"
-    found=true
-  fi
-  for entry in "$dir"tui.tsx "$dir"tui.ts "$dir"tui.jsx "$dir"tui.js; do
-    if [ -f "$entry" ]; then
-      ln -sfn "$entry" "$CONFIG/plugins/tui/$name.${entry##*.}"
-      echo "plugin/tui     tui/$name.${entry##*.}"
-      found=true
-      break
-    fi
-  done
-  if [ "$found" = false ]; then
+  else
     echo "plugin/skip    $name (no <name>.ts or tui.* entrypoint)"
   fi
 done
