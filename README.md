@@ -25,7 +25,7 @@ my-opencode-setup/
 
 Regular plugins that hook OpenCode's event/tool system. Server-only plugins use OpenCode's top-level `plugins/*.{ts,js}` discovery. Plugins that also have a TUI entrypoint use the package-directory layout described below.
 
-Top-level-only applies to discovery of a server-only entry file, not to what it may import. Bun resolves relative specifiers against a module's real path, so a plugin can split into a `lib/` folder and still be found. `recall/` does exactly that.
+Top-level-only applies to discovery of a server-only entry file, not to what it may import. Bun resolves relative specifiers against a module's real path, so a plugin can split into a `lib/` folder and still be found. `recall/` and `token-refresh/` do exactly that.
 
 | Plugin | Description | Requires / config |
 |---|---|---|
@@ -34,9 +34,10 @@ Top-level-only applies to discovery of a server-only entry file, not to what it 
 | [`hark/`](plugins/hark/README.md) | Push notifications to a [Hark](https://hark.ryan.ceo) webhook when a long-running session finishes, needs permission, asks a question, or errors — so you get pinged on your iPhone. | `HARK_WEBHOOK_URL` env (no-op without it); a Hark account. |
 | [`mcp-lazy/`](plugins/mcp-lazy/README.md) | Model-controlled MCP server enable/disable so only in-use servers cost tool-schema context. Adds `mcp_enable` / `mcp_disable`. | — |
 | [`message-timestamps/`](plugins/message-timestamps/README.md) | Gives the model a clock: stamps every user message with local time (plus idle gap and previous-turn duration when they matter) and selectively stamps slow tool results, without breaking prompt caching. | Optional `OPENCODE_MESSAGE_TIMESTAMP*` env overrides. |
-| [`recall/`](plugins/recall/README.md) | Long-term conversational memory: hybrid lexical (FTS5/BM25) + semantic (local transformers.js embeddings) search over every past OpenCode conversation. An escalation ladder of tools: `recall_search` (find sessions) / `recall_inspect` (search within one, or outline it) / `recall_expand` (read transcript) / `recall_summarize` (delegate to a cheap worker model, cached permanently) / `recall_status`. Announces long background indexing via TUI toasts and stays silent for routine catch-up. The only multi-file plugin here (`lib/` + `bun test`). | One-time ~33 MB model download; reads the OpenCode DB read-only. Optional `~/.config/opencode/recall.json`. |
+| [`recall/`](plugins/recall/README.md) | Long-term conversational memory: hybrid lexical (FTS5/BM25) + semantic (local transformers.js embeddings) search over every past OpenCode conversation. An escalation ladder of tools: `recall_search` (find sessions) / `recall_inspect` (search within one, or outline it) / `recall_expand` (read transcript) / `recall_summarize` (delegate to a cheap worker model, cached permanently) / `recall_status`. Announces long background indexing via TUI toasts and stays silent for routine catch-up. Multi-file (`lib/` + `bun test`). | One-time ~33 MB model download; reads the OpenCode DB read-only. Optional `~/.config/opencode/recall.json`. |
 | `model-identity/` | Stamps each user message with the resolved model and reasoning effort (`<model-slug>` / `<model-effort>`), so the model knows what it is. | — |
 | `subagent-model/` | Adds an optional per-invocation `model` override to the native `subagent` tool while retaining native child sessions, jobs, and TUI rendering. | — |
+| [`token-refresh/`](plugins/token-refresh/README.md) | Keeps every stored OAuth credential fresh, including inactive accounts, by resolving each one through core on a jittered two-minute schedule. Core does the actual refresh and persistence. | Logs to `~/.local/share/opencode/token-refresh.log`. |
 
 ## TUI plugins
 
