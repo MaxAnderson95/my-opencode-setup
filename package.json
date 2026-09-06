@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "oc-plugin-token-refresh",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "main": "./token-refresh.ts",
+  "engines": { "opencode": ">=2.0.0-0" },
+  "peerDependencies": { "@opencode-ai/plugin": "*" }
+}
