@@ -23,12 +23,17 @@ Ranked session search. Lexical and semantic branches run in parallel and are fus
 |---|---|---|
 | `query` | — | Natural language or exact keywords/identifiers |
 | `mode` | `hybrid` | `hybrid` fuses both branches; `lexical` = exact terms only; `semantic` = meaning only |
+| `scope` | `all` | `user-messages` searches only top-level user text; `all` keeps broad conversation search |
 | `directory` | — | Substring filter on the session working directory |
 | `since` / `until` | — | ISO date bounds |
 | `include_tools` | `true` | Include tool outputs (bash/file contents) in lexical matching |
 | `limit` | 8 (1–25) | Max sessions returned |
 
 Lexical queries are safe against FTS5 operator injection (every token is quoted) and fall back from AND to OR matching when a multi-word query has no strict match.
+
+Use `scope: "user-messages"` to find an original request or correction. It excludes V2 synthetic messages, legacy parts explicitly marked synthetic, child-session assignments, assistant text, and tool output. Semantic matching uses separate user-text embeddings, so an assistant's answer cannot supply the match. Both branches apply scope before the candidate limit. Broad semantic search continues to use conversation chunks.
+
+Results label evidence as top-level user text, child user text, synthetic context, assistant text, or tool output. Broad semantic chunks are labeled mixed-origin conversation context. These labels describe stored provenance, not verified human authorship: injected text stored as an ordinary user message without a synthetic marker cannot be reliably distinguished.
 
 **Every filter is applied inside the SQL**, never as a post-filter over a fixed top-N BM25 cut. For a term that is common across the corpus the best-ranked rows can all belong to sessions the filters exclude, and a post-filter would return nothing while matches exist.
 
@@ -56,6 +61,7 @@ Looks inside one session — the cheap middle rung between finding a session and
 | `session_id` | — | `ses_...` id or slug |
 | `query` | — | Search within the session; omit for the user-turn outline |
 | `mode` | `hybrid` | `lexical` / `semantic` as in `recall_search` |
+| `scope` | `all` | Same scopes as `recall_search`; requires query mode |
 | `include_tools` | `true` | Include tool outputs in lexical matching |
 | `limit` | 12 (1–30) | Max hits in query mode |
 
@@ -90,6 +96,12 @@ The hidden worker agent is only registered when summarization is enabled; it pin
 ### `recall_status`
 
 Index health: sessions/chunks indexed, backfill progress, embedder state, summary-cache count, index size on disk, config source, process RSS. If recall failed to initialise, this is the **only** tool registered and it reports the reason — a silent disable leaves no way to diagnose from inside a session.
+
+## Origin index migration
+
+Schema 3 adds origin-filter metadata and separate user-message chunks. Upgrading a schema-2 index with the same embedding model preserves existing chunks, embeddings, and summaries. The normal background backfill revisits sessions even when their source timestamps are unchanged, reuses embeddings by content hash, and computes embeddings for new or changed text. Broad search remains available while user-message coverage builds; search output reports sessions pending origin backfill. Pending sessions are excluded from user-message scope.
+
+Reload all OpenCode instances using this index together when deploying this schema change. An old plugin's migration code treats an unfamiliar schema version as a reset; do not reopen the migrated index with the old plugin. This changes only recall's derived sidecar, never the OpenCode history database.
 
 ## Background work is announced
 

@@ -10,7 +10,7 @@
  */
 import type { Database } from "bun:sqlite"
 
-export const SCHEMA_VERSION = "2"
+export const SCHEMA_VERSION = "3"
 
 export type MigrationResult = { reset: boolean; reason: string; reclaimedBytes: number }
 
@@ -34,7 +34,8 @@ export function createSchema(db: Database): void {
     time INTEGER NOT NULL,
     hash TEXT NOT NULL,
     text TEXT NOT NULL,
-    emb BLOB NOT NULL)`)
+    emb BLOB NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'all')`)
   db.run(`CREATE INDEX IF NOT EXISTS chunks_session ON chunks(session_id)`)
 
   // Row metadata for the contentless FTS table; parts.id IS the fts rowid.
@@ -46,7 +47,8 @@ export function createSchema(db: Database): void {
     kind TEXT NOT NULL,
     role TEXT NOT NULL,
     time INTEGER NOT NULL,
-    seg_start INTEGER NOT NULL DEFAULT 0)`)
+    seg_start INTEGER NOT NULL DEFAULT 0,
+    user_message INTEGER NOT NULL DEFAULT 0)`)
   db.run(`CREATE INDEX IF NOT EXISTS parts_session ON parts(session_id)`)
   db.run(`CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(text, content='', contentless_delete=1)`)
 
@@ -54,7 +56,8 @@ export function createSchema(db: Database): void {
     session_id TEXT PRIMARY KEY,
     time_updated INTEGER NOT NULL,
     chunks INTEGER NOT NULL DEFAULT 0,
-    fts_rows INTEGER NOT NULL DEFAULT 0)`)
+    fts_rows INTEGER NOT NULL DEFAULT 0,
+    revision INTEGER NOT NULL DEFAULT 0)`)
 
   db.run(`CREATE TABLE IF NOT EXISTS sessions(
     id TEXT PRIMARY KEY, slug TEXT, title TEXT, directory TEXT,
@@ -85,15 +88,26 @@ export function setMeta(db: Database, key: string, value: string): void {
 /**
  * Bring an existing index up to the current schema and embedding model.
  *
- * Either mismatch invalidates every indexed row, so the cheapest correct move
- * is to drop and rebuild from the source, which is always authoritative.
- * Summaries are preserved.
+ * Schema 2 upgrades retain embeddings and mark sessions for origin backfill.
+ * Other schema or model mismatches rebuild derived rows from the source.
+ * Summaries survive either path.
  */
 export function migrate(db: Database, modelTag: string, dbSize: () => number): MigrationResult {
   db.run(`CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)`)
   const priorSchema = getMeta(db, "schema")
   const priorModel = getMeta(db, "model")
   const legacy = !priorSchema && tableExists(db, "fts")
+
+  if (priorSchema === "2" && priorModel === modelTag) {
+    db.transaction(() => {
+      if (getMeta(db, "schema") === SCHEMA_VERSION) return
+      db.run("ALTER TABLE chunks ADD COLUMN scope TEXT NOT NULL DEFAULT 'all'")
+      db.run("ALTER TABLE parts ADD COLUMN user_message INTEGER NOT NULL DEFAULT 0")
+      db.run("ALTER TABLE indexed_sessions ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
+      setMeta(db, "schema", SCHEMA_VERSION)
+    }).immediate()
+    return { reset: false, reason: "origin and user-message backfill required", reclaimedBytes: 0 }
+  }
 
   const reason = legacy
     ? "pre-versioned index"

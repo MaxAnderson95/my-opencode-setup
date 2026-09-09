@@ -553,14 +553,14 @@ describe("v2 source layer", () => {
     expect(source.findSession("sluggy")[0]?.id).toBe("ses_t")
   })
 
-  test("synthetic messages index as user text but stay out of the outline", () => {
+  test("synthetic messages retain their origin and stay out of the outline", () => {
     const db = createSourceDb([
       { id: "ses_syn", messages: [{ role: "user", parts: [{ type: "text", text: "real ask" }] }] },
     ])
     insertV2Message(db, "ses_syn", 1, "synthetic", { time: { created: 2 }, text: "injectedContextToken" }, 2)
     const source = new Source(db)
     const roles = source.messages("ses_syn").map((m) => m.role)
-    expect(roles).toEqual(["user", "user"])
+    expect(roles).toEqual(["user", "synthetic"])
     const texts = source.parts("ses_syn").map((p) => extractPartText(parseJson(p.data), EXTRACT)!.text)
     expect(texts).toContain("injectedContextToken")
     expect(source.userTurns("ses_syn").map((t) => t.txt)).toEqual(["real ask"])
@@ -924,6 +924,68 @@ const NO_FILTER: Filters = {
 }
 
 describe("indexing and search", () => {
+  test("user scope excludes synthetic, assistant and child text before either candidate cut", async () => {
+    const { src, idx, indexer, searcher } = buildIndex([
+      { id: "ses_human", messages: [
+        { role: "user", parts: [{ type: "text", text: "Do not request reviewers; wait for my instruction." }] },
+        { role: "assistant", parts: [{ type: "text", text: "assistantOnlyToken reviewers" }] },
+      ] },
+      { id: "ses_child", messages: [{ role: "user", parts: [{ type: "text", text: "reviewers childOnlyToken" }] }] },
+    ], { search: { candidates: 1 } })
+    src.run("UPDATE session_v2 SET parent_id='ses_human' WHERE id='ses_child'")
+    insertV2Message(src, "ses_human", 2, "synthetic", { text: "reviewers injectedOnlyToken", time: { created: 3 } }, 3)
+    await indexer.backfill()
+    const filter: Filters = { ...NO_FILTER, scope: "user-messages" }
+    expect(searcher.lexical("reviewers", filter).map((h) => h.session_id)).toEqual(["ses_human"])
+    for (const word of ["assistantOnlyToken", "childOnlyToken", "injectedOnlyToken"]) {
+      expect(searcher.lexical(word, filter)).toEqual([])
+      expect(searcher.lexical(word, NO_FILTER).length).toBeGreaterThan(0)
+    }
+    const sem = await searcher.semantic("reviewers", filter)
+    expect(sem.map((h) => h.session_id)).toEqual(["ses_human"])
+    expect(sem[0].via).toContain("Top-level user message")
+    expect(idx.query("SELECT text FROM chunks WHERE scope='user-messages'").all()).toEqual([
+      { text: "Do not request reviewers; wait for my instruction." },
+    ])
+    expect(searcher.lexical("injectedOnlyToken", NO_FILTER)[0].via).toContain("Synthetic context")
+    expect(await searcher.semantic("reviewers", { ...filter, sessionId: "ses_child" })).toEqual([])
+  })
+
+  test("schema 2 migration preserves embeddings and forces origin backfill", async () => {
+    const { idx, indexer } = buildIndex([{ id: "ses_migrate", messages: [
+      { role: "user", parts: [{ type: "text", text: "Keep the sidebar badge" }] },
+    ] }])
+    await indexer.indexSession("ses_migrate")
+    idx.run("DELETE FROM chunks WHERE scope='user-messages'")
+    const before = idx.query("SELECT hash, emb FROM chunks").all()
+    idx.run("ALTER TABLE chunks DROP COLUMN scope")
+    idx.run("ALTER TABLE parts DROP COLUMN user_message")
+    idx.run("ALTER TABLE indexed_sessions DROP COLUMN revision")
+    setMeta(idx, "schema", "2")
+    expect(migrate(idx, "test:8", () => 0).reset).toBe(false)
+    expect(idx.query("SELECT hash, emb FROM chunks").all()).toEqual(before)
+    expect(idx.query("SELECT revision FROM indexed_sessions").get()).toEqual({ revision: 0 })
+    await indexer.backfill()
+    expect(idx.query("SELECT revision FROM indexed_sessions").get()).toEqual({ revision: 1 })
+    expect(idx.query("SELECT hash, emb FROM chunks WHERE scope='all'").all()).toEqual(before)
+    expect(idx.query("SELECT count(*) n FROM chunks WHERE scope='user-messages'").get()).toEqual({ n: 1 })
+  })
+
+  test("legacy synthetic parts are excluded without losing the real text in the same message", async () => {
+    const src = createSourceDbV1([{ id: "ses_legacy_scope", messages: [{ role: "user", parts: [
+      { type: "text", text: "keep the TUI plugin" },
+      { type: "text", text: "injectedLegacyToken" },
+    ] }] }])
+    src.run("UPDATE part SET data=json_set(data,'$.synthetic',json('true')) WHERE json_extract(data,'$.text')='injectedLegacyToken'")
+    const { indexer, searcher, idx } = buildIndexFromDb(src)
+    await indexer.backfill()
+    const filter: Filters = { ...NO_FILTER, scope: "user-messages" }
+    expect(searcher.lexical("injectedLegacyToken", filter)).toEqual([])
+    expect(searcher.lexical("TUI", filter)).toHaveLength(1)
+    expect(searcher.lexical("injectedLegacyToken", NO_FILTER)[0].via).toContain("Synthetic context")
+    expect(idx.query("SELECT text FROM chunks WHERE scope='user-messages'").all()).toEqual([{ text: "keep the TUI plugin" }])
+  })
+
   test("round trip: index, find lexically, snippet from source", async () => {
     const { indexer, searcher } = buildIndex([
       {
@@ -1028,7 +1090,7 @@ describe("indexing and search", () => {
       },
     ])
     await indexer.indexSession("ses_c")
-    const chunks = idx.query(`SELECT text FROM chunks`).all() as { text: string }[]
+    const chunks = idx.query(`SELECT text FROM chunks WHERE scope='all'`).all() as { text: string }[]
     expect(chunks.length).toBeGreaterThan(5)
     expect(chunks.some((c) => c.text.includes(tail))).toBe(true)
     // Every chunk after the first is re-anchored to the user's intent.
