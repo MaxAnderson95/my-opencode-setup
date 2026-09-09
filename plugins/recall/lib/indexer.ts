@@ -49,12 +49,13 @@ type PendingPart = {
   part_id: string
   kind: string
   role: string
+  user_message: number
   time: number
   seg_start: number
   text: string
 }
 
-type PendingChunk = { message_id: string; time: number; text: string; hash: string }
+type PendingChunk = { message_id: string; time: number; text: string; hash: string; scope: string }
 
 export class Indexer {
   readonly state: BackfillState = {
@@ -84,11 +85,11 @@ export class Indexer {
       delIndexed: db.prepare(`DELETE FROM indexed_sessions WHERE session_id=?`),
       delSession: db.prepare(`DELETE FROM sessions WHERE id=?`),
       insPart: db.prepare(
-        `INSERT INTO parts(session_id,message_id,part_id,kind,role,time,seg_start) VALUES (?,?,?,?,?,?,?)`,
+        `INSERT INTO parts(session_id,message_id,part_id,kind,role,time,seg_start,user_message) VALUES (?,?,?,?,?,?,?,?)`,
       ),
       insFts: db.prepare(`INSERT INTO fts(rowid,text) VALUES (?,?)`),
       insChunk: db.prepare(
-        `INSERT INTO chunks(session_id,message_id,time,hash,text,emb) VALUES (?,?,?,?,?,?)`,
+        `INSERT INTO chunks(session_id,message_id,time,hash,text,emb,scope) VALUES (?,?,?,?,?,?,?)`,
       ),
       upsertSession: db.prepare(
         `INSERT INTO sessions(id,slug,title,directory,parent_id,time_created,time_updated)
@@ -97,12 +98,12 @@ export class Indexer {
            directory=excluded.directory, parent_id=excluded.parent_id, time_updated=excluded.time_updated`,
       ),
       upsertIndexed: db.prepare(
-        `INSERT INTO indexed_sessions(session_id,time_updated,chunks,fts_rows) VALUES (?,?,?,?)
+        `INSERT INTO indexed_sessions(session_id,time_updated,chunks,fts_rows,revision) VALUES (?,?,?,?,1)
          ON CONFLICT(session_id) DO UPDATE SET time_updated=excluded.time_updated,
-           chunks=excluded.chunks, fts_rows=excluded.fts_rows`,
+            chunks=excluded.chunks, fts_rows=excluded.fts_rows, revision=1`,
       ),
       priorEmb: db.prepare(`SELECT hash, emb FROM chunks WHERE session_id=?`),
-      watermark: db.prepare(`SELECT time_updated t FROM indexed_sessions WHERE session_id=?`),
+      watermark: db.prepare(`SELECT time_updated t FROM indexed_sessions WHERE session_id=? AND revision=1`),
     }
   }
 
@@ -129,6 +130,7 @@ export class Indexer {
     const roleOf = new Map(messages.map((m) => [m.id, m.role ?? "assistant"]))
     const parts: PendingPart[] = []
     const textByMessage = new Map<string, string[]>()
+    const userTextByMessage = new Map<string, string[]>()
 
     for (const p of this.d.source.parts(s.id)) {
       const data = parseJson(p.data)
@@ -138,7 +140,13 @@ export class Indexer {
         skipTools: this.d.skipTools,
       })
       if (!extracted) continue
-      const role = roleOf.get(p.message_id) ?? "assistant"
+      const role = (data as { synthetic?: boolean }).synthetic === true ? "synthetic" : roleOf.get(p.message_id) ?? "assistant"
+      const userMessage = role === "user" && !s.parent_id && extracted.kind === "text"
+      if (userMessage) {
+        const texts = userTextByMessage.get(p.message_id) ?? []
+        texts.push(extracted.text)
+        userTextByMessage.set(p.message_id, texts)
+      }
       const d = data as any
       const time = d.time?.start ?? d.time?.created ?? s.time_created
 
@@ -150,6 +158,7 @@ export class Indexer {
           part_id: p.id,
           kind: extracted.kind,
           role,
+          user_message: Number(userMessage),
           time,
           seg_start: seg.start,
           text: seg.text,
@@ -176,7 +185,7 @@ export class Indexer {
           cur = { message_id: m.id, time: m.time_created, user: [], assistant: [] }
           turns.push(cur)
         }
-        cur.assistant.push(...texts)
+        cur.assistant.push(...(m.role === "assistant" ? texts : texts.map((text) => `[${m.role}] ${text}`)))
       }
     }
 
@@ -192,8 +201,15 @@ export class Indexer {
       const anchor = user ? `(re: ${clean(user, 160)})\n` : ""
       windows.forEach((w, i) => {
         const text = i === 0 ? w : anchor + w
-        chunks.push({ message_id: t.message_id, time: t.time, text, hash: String(Bun.hash(text)) })
+        chunks.push({ message_id: t.message_id, time: t.time, text, hash: String(Bun.hash(text)), scope: "all" })
       })
+    }
+    for (const m of messages) {
+      const text = userTextByMessage.get(m.id)?.join("\n")
+      if (!text) continue
+      for (const window of chunkText(text, cfg.chunk.chars, cfg.chunk.overlap, cfg.chunk.maxPerTurn)) {
+        chunks.push({ message_id: m.id, time: m.time_created, text: window, hash: String(Bun.hash(window)), scope: "user-messages" })
+      }
     }
     return { parts, chunks }
   }
@@ -249,7 +265,7 @@ export class Indexer {
         for (const c of chunks) {
           const emb = fresh.get(c.hash) ?? prior.get(c.hash)
           if (!emb) continue
-          this.s.insChunk.run(sessionId, c.message_id, c.time, c.hash, c.text, emb)
+          this.s.insChunk.run(sessionId, c.message_id, c.time, c.hash, c.text, emb, c.scope)
         }
         for (const p of parts) {
           const res = this.s.insPart.run(
@@ -260,6 +276,7 @@ export class Indexer {
             p.role,
             p.time,
             p.seg_start,
+            p.user_message,
           )
           this.s.insFts.run(Number(res.lastInsertRowid), p.text)
         }
@@ -299,13 +316,14 @@ export class Indexer {
       const source = allSource.filter((s) => !this.d.exclusions.matches(s.directory))
       const wms = new Map(
         (
-          this.d.idx.query(`SELECT session_id s, time_updated t FROM indexed_sessions`).all() as {
-            s: string
-            t: number
+           this.d.idx.query(`SELECT session_id s, time_updated t, revision FROM indexed_sessions`).all() as {
+             s: string
+             t: number
+             revision: number
           }[]
-        ).map((r) => [r.s, r.t]),
+        ).map((r) => [r.s, r]),
       )
-      const stale = source.filter((s) => (wms.get(s.id) ?? 0) < s.t)
+      const stale = source.filter((s) => wms.get(s.id)?.revision !== 1 || (wms.get(s.id)?.t ?? 0) < s.t)
       this.state.total = stale.length
       this.state.done = 0
       const announcer = new BackfillAnnouncer(this.d.notify ?? noopNotify, this.d.config.notify)

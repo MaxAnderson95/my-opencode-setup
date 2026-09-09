@@ -77,18 +77,6 @@ const V2_TYPE_LIST = V2_TYPES.map((t) => `'${t}'`).join(",")
 
 type V2Type = (typeof V2_TYPES)[number]
 
-/**
- * Synthetic messages are injected context (command output, reminders) that in
- * the v1 schema lived inside user messages, where recall indexed them as user
- * text; mapping them to the user role preserves that. Compaction / shell /
- * skill keep their own labels for transcript display and behave as assistant
- * turns during chunking, which only distinguishes user from everything else.
- */
-function roleOf(type: string): string {
-  if (type === "user" || type === "synthetic") return "user"
-  return type
-}
-
 const V2_SESSION_COLS = `id, slug, COALESCE(title,'') title, directory, parent_id, time_created, time_updated`
 const V1_SESSION_COLS = `id, slug, title, directory, parent_id, time_created, time_updated`
 
@@ -323,7 +311,7 @@ export class Source {
            WHERE session_id=? AND type IN (${V2_TYPE_LIST}) ORDER BY seq`,
         )
         .all(sessionId) as { id: string; type: V2Type; time_created: number }[]
-      return rows.map((r) => ({ id: r.id, role: roleOf(r.type), time_created: r.time_created }))
+      return rows.map((r) => ({ id: r.id, role: r.type, time_created: r.time_created }))
     }
     if (!this.hasV1) return []
     return this.db

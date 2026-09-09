@@ -26,6 +26,7 @@ export type Hit = {
 }
 
 export type Filters = {
+  scope?: "all" | "user-messages"
   since: number
   until: number
   includeTools: boolean
@@ -67,12 +68,14 @@ export class SearchIndex {
     if (f.sessionId) where.push("p.session_id = ?")
     if (f.directory) where.push("s.directory LIKE ?")
     if (!f.includeTools) where.push("p.kind <> 'tool'")
+    if (f.scope === "user-messages") where.push("p.user_message = 1 AND s.parent_id IS NULL")
     where.push("p.time BETWEEN ? AND ?")
     if (f.excludeSession) where.push("NOT (p.session_id = ? AND p.time >= ?)")
-    const sql = `SELECT p.session_id, p.message_id, p.part_id, p.kind, p.seg_start, CAST(p.time AS INTEGER) time
+    const sql = `SELECT p.session_id, p.message_id, p.part_id, p.kind, p.role, s.parent_id, i.revision, p.seg_start, CAST(p.time AS INTEGER) time
        FROM fts
        JOIN parts p ON p.id = fts.rowid
-       JOIN sessions s ON s.id = p.session_id
+        JOIN sessions s ON s.id = p.session_id
+        LEFT JOIN indexed_sessions i ON i.session_id = p.session_id
        WHERE ${where.join(" AND ")}
        ORDER BY rank LIMIT ?`
     let stmt = this.lexStmts.get(sql)
@@ -100,6 +103,9 @@ export class SearchIndex {
         message_id: string
         part_id: string
         kind: string
+        role: string
+        parent_id: string | null
+        revision: number | null
         seg_start: number
         time: number
       }[]
@@ -107,7 +113,7 @@ export class SearchIndex {
         session_id: r.session_id,
         message_id: r.message_id,
         time: r.time,
-        via: `lexical/${r.kind}`,
+        via: `lexical/${r.kind} · ${r.revision !== 1 ? "Origin pending backfill" : r.kind === "tool" ? "Tool output" : r.role === "user" ? r.parent_id ? "Child user message" : "Top-level user message" : r.role === "synthetic" ? "Synthetic context" : `${r.role} text`}`,
         src: { kind: "part", part_id: r.part_id, seg_start: r.seg_start, part_kind: r.kind } as HitSource,
       }))
     }
@@ -131,6 +137,7 @@ export class SearchIndex {
     const allow = f.directory ? this.sessionsInDirectory(f.directory) : null
     const scored: { score: number; i: number }[] = []
     for (let i = 0; i < m.n; i++) {
+      if (m.scopes[i] !== (f.scope ?? "all")) continue
       const t = m.times[i]
       if (t < f.since || t > f.until) continue
       const sid = m.sessions[i]
@@ -144,7 +151,7 @@ export class SearchIndex {
       session_id: m.sessions[t.i],
       message_id: m.messages[t.i],
       time: m.times[t.i],
-      via: `semantic ${t.score.toFixed(2)}`,
+      via: `semantic ${t.score.toFixed(2)} · ${m.scopes[t.i] === "user-messages" ? "Top-level user message" : "Conversation context (mixed origins)"}`,
       src: { kind: "chunk", chunk_id: m.ids[t.i] } as HitSource,
     }))
   }
@@ -217,9 +224,10 @@ export class SearchIndex {
       times: new Float64Array(count),
       sessions: new Array(count),
       messages: new Array(count),
+      scopes: new Array(count),
     }
     const page = this.idx.prepare(
-      `SELECT id, session_id, message_id, time, emb FROM chunks WHERE id > ? ORDER BY id LIMIT 4000`,
+      `SELECT id, session_id, message_id, time, emb, scope FROM chunks WHERE id > ? ORDER BY id LIMIT 4000`,
     )
     let i = 0
     let lastId = 0
@@ -230,6 +238,7 @@ export class SearchIndex {
         message_id: string
         time: number
         emb: Uint8Array
+        scope: string
       }[]
       if (!rows.length) break
       for (const r of rows) {
@@ -239,6 +248,7 @@ export class SearchIndex {
         next.times[i] = r.time
         next.sessions[i] = r.session_id
         next.messages[i] = r.message_id
+        next.scopes[i] = r.scope
         i++
       }
     }
@@ -264,6 +274,7 @@ type Matrix = {
   times: Float64Array
   sessions: string[]
   messages: string[]
+  scopes: string[]
 }
 
 function toVec(blob: Uint8Array, dims: number): Float32Array {

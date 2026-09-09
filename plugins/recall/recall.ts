@@ -330,6 +330,7 @@ export default Plugin.define({
         chunks: (idxDb.query(`SELECT count(*) c FROM chunks`).get() as { c: number }).c,
         ftsRows: (idxDb.query(`SELECT count(*) c FROM parts`).get() as { c: number }).c,
         indexed: (idxDb.query(`SELECT count(*) c FROM indexed_sessions`).get() as { c: number }).c,
+        originPending: (idxDb.query(`SELECT count(*) c FROM indexed_sessions WHERE revision=0`).get() as { c: number }).c,
         total: sourceSessions.filter((s) => !exclusions.matches(s.directory)).length,
         excluded: sourceSessions.filter((s) => exclusions.matches(s.directory)).length,
       }
@@ -380,6 +381,7 @@ export default Plugin.define({
           required: ["query"],
           properties: {
             query: { type: "string", description: "Search query — natural language or exact keywords/identifiers" },
+            scope: { type: "string", enum: ["all", "user-messages"], description: "Default all. Use user-messages to search top-level user text, excluding known synthetic context and child assignments." },
             mode: MODE_SCHEMA,
             directory: {
               type: "string",
@@ -407,6 +409,7 @@ export default Plugin.define({
             )
           }
           const f: Filters = {
+            scope: args.scope === "user-messages" ? "user-messages" : "all",
             since: parseWhen(optStr(args.since), 0),
             until: parseWhen(optStr(args.until), Number.MAX_SAFE_INTEGER),
             includeTools: optBool(args.include_tools) !== false,
@@ -427,7 +430,7 @@ export default Plugin.define({
           )
           if (!groups.length)
             return asResult(
-              `No matches for "${query}" (${mode}). Try mode=semantic for fuzzy recall, fewer/different keywords, or drop filters. Index: ${c.indexed}/${c.total} sessions.`,
+              `No matches for "${query}" (${mode}, scope=${f.scope}). Try mode=semantic for fuzzy recall, fewer/different keywords, or drop filters. Index: ${c.indexed}/${c.total} sessions; ${c.originPending} pending origin backfill. User-message scope excludes sessions pending that backfill.`,
             )
 
           const ranked = groups.slice(0, clampInt(optNum(args.limit), 1, 25, 8))
@@ -436,6 +439,7 @@ export default Plugin.define({
 
           const lines: string[] = [
             `index: ${c.indexed}/${c.total} sessions, ${c.chunks} chunks${indexer.state.running ? ` · backfill ${indexer.state.done}/${indexer.state.total} running` : ""}`,
+            `scope=${f.scope}; ${c.originPending} sessions pending origin backfill (excluded from user-message scope)`,
           ]
           ranked.forEach((g, i) => {
             const s = source.session(g.key)
@@ -523,6 +527,7 @@ export default Plugin.define({
           properties: {
             session_id: { type: "string", description: "Session id (ses_...) or slug from recall_search" },
             query: { type: "string", description: "Search within the session (omit for a user-turn outline)" },
+            scope: { type: "string", enum: ["all", "user-messages"], description: "Search scope in query mode: all (default), or top-level user messages without known synthetic context or child assignments." },
             mode: MODE_SCHEMA,
             include_tools: {
               type: "boolean",
@@ -542,6 +547,7 @@ export default Plugin.define({
           const query = optStr(args.query)
 
           if (!query?.trim()) {
+            if (args.scope === "user-messages") return asResult("scope=user-messages requires a query; omit scope for the standard user-turn outline.")
             const total = source.messageCount(s.id)
             const turns = source.userTurns(s.id)
             const line = (r: { id: string; t: number; txt: string }, i: number) =>
@@ -569,6 +575,7 @@ export default Plugin.define({
           }
 
           const f: Filters = {
+            scope: args.scope === "user-messages" ? "user-messages" : "all",
             since: 0,
             until: Number.MAX_SAFE_INTEGER,
             includeTools: optBool(args.include_tools) !== false,
@@ -594,11 +601,11 @@ export default Plugin.define({
             { rrfK: config.search.rrfK },
           )
           if (!fused.length) {
-            const indexed = idxDb.query(`SELECT 1 FROM indexed_sessions WHERE session_id=?`).get(s.id)
+            const indexed = idxDb.query(`SELECT 1 FROM indexed_sessions WHERE session_id=? AND revision=1`).get(s.id)
             const hint = indexed
               ? "Likely not discussed in this session. Try different keywords, mode=semantic (unfiltered ranking), or omit query for a user-turn outline."
               : "This session is not indexed yet (the index lags a few minutes behind live sessions) — recall_expand reads it directly."
-            return asResult(`${head}\n\nNo matches for "${query}" (${mode}) in this session. ${hint}`)
+            return asResult(`${head}\n\nNo matches for "${query}" (${mode}, scope=${f.scope}) in this session. ${hint} User-message scope excludes child sessions and sessions pending origin backfill.`)
           }
 
           const top = fused.slice(0, clampInt(optNum(args.limit), 1, 30, 12))
@@ -728,6 +735,7 @@ export default Plugin.define({
                 : "not yet run"
           const lines = [
             `sessions indexed: ${c.indexed}/${c.total} eligible`,
+            `sessions pending origin backfill: ${c.originPending}`,
             `sessions excluded: ${c.excluded} (${exclusions.entries().length} configured directories)`,
             `embedded chunks: ${c.chunks}`,
             `fts rows: ${c.ftsRows}`,
