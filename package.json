@@ -9,6 +9,6 @@
     "./tui": "./tui.tsx"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": "*"
+    "@opencode-ai/plugin": "0.0.0-next-17403"
   }
 }
