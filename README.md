@@ -23,7 +23,7 @@ my-opencode-setup/
 
 ## Server plugins
 
-Each plugin is a self-contained package directory with its own `package.json`, entrypoint and dependencies. OpenCode installs individual directories from GitHub using npm's `::path:` selector. Imports stay within the package or use declared package dependencies.
+Each plugin is a self-contained package directory with its own `package.json`, entrypoint and dependencies. `scripts/publish-plugins.sh` publishes each folder to a `plugin-NAME` branch in this repository, placing its package at the Git dependency root. Imports stay within the package or use declared package dependencies.
 
 | Plugin | Description | Requires / config |
 |---|---|---|
@@ -90,8 +90,8 @@ Seven plugins were dropped in the OpenCode 2 port on the belief that v2 grew a n
 Install the selected plugin packages from GitHub:
 
 ```bash
-opencode2 plugin add 'github:MaxAnderson95/my-opencode-setup#main::path:plugins/recall'
-opencode2 plugin add 'github:MaxAnderson95/my-opencode-setup#main::path:plugins/background-jobs'
+opencode2 plugin add 'github:MaxAnderson95/my-opencode-setup#plugin-recall'
+opencode2 plugin add 'github:MaxAnderson95/my-opencode-setup#plugin-background-jobs'
 ```
 
 For skills and the theme, clone the repo and run the idempotent `link.sh`:
@@ -104,9 +104,9 @@ cd ~/my-opencode-setup
 
 ## How plugins load (for adapters)
 
-Package resolution uses `./server`, then the root export or `main`, with conventional index entrypoints as fallback. TUI packages export `./tui`. Branch specifications are mutable but updates are explicit: edit locally, run checks, commit and push, then run `opencode2 plugin update` for the selected GitHub package and verify its installed revision and behavior. A local source edit alone is not a deployment.
+Package resolution uses `./server`, then the root export or `main`, with conventional index entrypoints as fallback. TUI packages export `./tui`. Branch specifications are mutable but updates are explicit: edit locally, run checks, commit and push, run `bash scripts/publish-plugins.sh`, then run `opencode2 plugin update` for the selected GitHub package and verify its installed revision and behavior. A local source edit alone is not a deployment.
 
-Use npm through Vite+ for development dependency installation; Bun runs the test suites. npm supports the Git subdirectory dependency syntax used by Hark's presence dependency. Do not create local plugin symlinks or edit OpenCode's installed package cache.
+The native OpenCode beta-19425 installer accepted a `::path:` specification but installed the repository root instead of the selected package contents during verification. Package branches avoid that behavior. npm 12 also requires explicit Git-dependency opt-in (`--allow-git=all`) for dependency installation. Do not create local plugin symlinks or edit OpenCode's installed package cache.
 
 ## License
 

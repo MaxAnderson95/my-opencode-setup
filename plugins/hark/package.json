@@ -6,6 +6,6 @@
   "private": true,
   "main": "./hark.ts",
   "engines": { "opencode": ">=2.0.0-0" },
-  "dependencies": { "oc-plugin-presence": "github:MaxAnderson95/my-opencode-setup#main::path:plugins/presence" },
+  "dependencies": { "oc-plugin-presence": "github:MaxAnderson95/my-opencode-setup#plugin-presence" },
   "peerDependencies": { "@opencode-ai/plugin": "0.0.0-next-17403" }
 }
