@@ -2,13 +2,16 @@
  * Pure inventory logic: which servers are protected, how the per-turn system
  * block renders, and the unknown-server message. Kept side-effect free so it
  * is directly testable; the entry wires it to live server state.
- *
- * Text is preserved verbatim from the v1 plugin — AGENTS.md documents this
- * exact block and the tool result phrasing, so wording is a compatibility
- * surface, not prose.
  */
 
-import type { McpServerConfig, McpServerRow } from "./server"
+import type { Plugin } from "@opencode/plugin"
+
+export type McpServerRow = Awaited<ReturnType<Plugin.Context["mcp"]["list"]>>["data"][number]
+export type McpServerConfig = {
+  type: "local" | "remote"
+  disabled?: boolean
+  oauth?: object | false
+}
 
 /**
  * Always-on rule, ported from v1's `enabled !== false`: v2 config spells it
@@ -33,8 +36,6 @@ export function unknownMsg(validNames: readonly string[], name: string): string 
 export function renderBlock(rows: readonly McpServerRow[], cfg: Record<string, McpServerConfig>): string {
   const active: string[] = []
   const available: string[] = []
-  // Servers YOU turned on this session (connected but not always-on) — the
-  // ones the model is responsible for turning back off.
   const sessionEnabled: string[] = []
 
   for (const row of rows) {
@@ -46,15 +47,15 @@ export function renderBlock(rows: readonly McpServerRow[], cfg: Record<string, M
       if (isProtected(cfg, name)) {
         active.push(`- ${name} (always-on)`)
       } else {
-        active.push(`- ${name} (enabled this session)`)
+        active.push(`- ${name} (enabled in this location)`)
         sessionEnabled.push(name)
       }
     } else if (state === "needs_auth") {
-      available.push(`- ${name}${oauthTag} — needs auth (have the user run: opencode mcp auth ${name})`)
+      available.push(`- ${name}${oauthTag}: needs auth (open /mcps, select the server, and sign in)`)
     } else if (state === "failed") {
-      available.push(`- ${name}${oauthTag} — currently unavailable`)
+      available.push(`- ${name}${oauthTag}: currently unavailable`)
     } else if (state === "pending") {
-      available.push(`- ${name}${oauthTag} — connecting`)
+      available.push(`- ${name}${oauthTag}: connecting`)
     } else {
       available.push(`- ${name}${oauthTag}`)
     }
@@ -66,15 +67,15 @@ export function renderBlock(rows: readonly McpServerRow[], cfg: Record<string, M
   const cleanup = sessionEnabled.length
     ? "\n\nYou currently have these enabled (each one's tool schemas are spending context every turn): " +
       `${sessionEnabled.join(", ")}. As soon as you no longer need a server, disable it with ` +
-      `mcp_disable(["${sessionEnabled[0]}"]). Do not leave servers enabled \u201Cjust in case\u201D — re-enabling is cheap.`
+      `mcp_disable({"servers":["${sessionEnabled[0]}"]}). State is shared by sessions in this location.`
     : ""
 
   return [
     "## MCP servers",
     "Each server's tools load only while it is Active, and every Active server's tool schemas cost context on " +
       "every turn. Enable a server with mcp_enable right before you need it; disable it with mcp_disable the " +
-      "moment you are done. After mcp_enable returns, continue immediately: the newly enabled tools will be " +
-      "available when you respond again. Do not wait for the user to send another message." +
+      "moment you are done. Connection state alone does not establish tool readiness. Check mcp_enable's " +
+      "result and use registered tools without waiting for another user message." +
       cleanup,
     "",
     "Active:",
