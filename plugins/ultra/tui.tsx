@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/solid */
 import { Plugin } from "@opencode-ai/plugin/tui"
 import { MouseButton, RGBA, TextAttributes } from "@opentui/core"
 import { readFile } from "node:fs/promises"
