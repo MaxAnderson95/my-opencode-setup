@@ -1,6 +1,6 @@
 /** @jsxImportSource @opentui/solid */
 import { Plugin } from "@opencode-ai/plugin/tui"
-import { createMemo, createSignal, For, Match, Show, Switch } from "solid-js"
+import { createMemo, createSignal, For, Match, Show, Switch, type Accessor } from "solid-js"
 import { readCallout, type CalloutState } from "./state"
 
 type Segment = {
@@ -60,7 +60,11 @@ export default Plugin.define({
     const refresh = async () => {
       for (const sessionID of sessions) {
         const value = await readCallout(sessionID)
-        setValues((current) => ({ ...current, [sessionID]: value }))
+        setValues((current) =>
+          current[sessionID]?.content === value?.content && current[sessionID]?.updatedAt === value?.updatedAt
+            ? current
+            : { ...current, [sessionID]: value },
+        )
       }
     }
 
@@ -70,7 +74,6 @@ export default Plugin.define({
       append: "sidebar.content",
       render: (input) => {
         sessions.add(input.sessionID)
-        void refresh()
         const warning = context.theme.text.feedback.warning.default
         const value = createMemo(() => values()[input.sessionID])
         const lines = createMemo(() =>
@@ -111,9 +114,11 @@ export default Plugin.define({
                       </text>
                     }
                   >
-                    <text fg={context.theme.text.default}>
-                      <a href={line.target!.href}>{line.target!.label}</a>
-                    </text>
+                    {(target: Accessor<NonNullable<ReturnType<typeof link>>>) => (
+                      <text fg={context.theme.text.default}>
+                        <a href={target().href}>{target().label}</a>
+                      </text>
+                    )}
                   </Show>
                 )}
               </For>
