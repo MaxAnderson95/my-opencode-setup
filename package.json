@@ -1,0 +1,30 @@
+{
+  "name": "opencode-ultra",
+  "version": "0.1.0",
+  "publishedAt": "2026-09-04",
+  "description": "Toggle proactive agent delegation per session with /ultra or a clickable, animated TUI indicator. Keeps your normal prompts, model, and permissions intact.",
+  "type": "module",
+  "exports": {
+    ".": "./index.ts",
+    "./tui": "./tui.tsx",
+    "./rpc": "./rpc.ts"
+  },
+  "files": ["index.ts", "tui.tsx", "rpc.ts"],
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "0.0.0-dev-19114",
+    "jsonc-parser": "3.3.1"
+  },
+  "devDependencies": {
+    "@opencode-ai/theme": "0.0.0-dev-19114",
+    "solid-js": "1.9.12",
+    "typescript": "5.9.3"
+  },
+  "peerDependencies": {
+    "@opentui/core": "^0.5.10",
+    "@opentui/solid": "^0.5.10",
+    "solid-js": "^1.9.0"
+  }
+}
