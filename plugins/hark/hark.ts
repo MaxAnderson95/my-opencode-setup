@@ -91,7 +91,7 @@ export default Plugin.define({
     const away = async () => {
       if (alwaysNotify) return true
       try {
-        const { presence } = await import("../presence/presence.ts")
+        const { presence } = await import("oc-plugin-presence")
         const state = await presence()
         return !state.atComputer
       } catch {

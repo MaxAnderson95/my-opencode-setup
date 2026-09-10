@@ -6,7 +6,7 @@ Personal [OpenCode](https://opencode.ai) plugins, skills, slash commands, and a 
 
 ## Requirements
 
-- **OpenCode 2** (the `opencode2` binary, `@opencode-ai/cli@next`); developed against `0.0.0-next-17403`. These plugins use the v2 plugin API and **do not load in OpenCode 1**.
+- **OpenCode 2 beta**, installed as the native `opencode2` binary through the upstream shell installer. Package manifests pin their compatible plugin SDK.
 - **[Bun](https://bun.sh)** — resolves plugin dependencies (`bun install`) and is the runtime for several plugins (`bun:sqlite`, `Bun.spawn`).
 - Individual plugins/skills may need extra tools — see the **Requires / config** column in each table.
 
@@ -17,15 +17,13 @@ my-opencode-setup/
 ├── plugins/          One folder per plugin, each with its own package.json
 ├── skills/           One folder per skill (SKILL.md)
 ├── themes/           Custom theme
-├── link.sh           Symlinks the plugins and skills into your OpenCode config
+├── link.sh           Links skills and themes; plugins install from GitHub
 └── cli.example.json  Sample cli.json (theme + TUI options)
 ```
 
 ## Server plugins
 
-Regular plugins that hook OpenCode's event/tool system. Server-only plugins use OpenCode's top-level `plugins/*.{ts,js}` discovery. Plugins that also have a TUI entrypoint use the package-directory layout described below.
-
-Top-level-only applies to discovery of a server-only entry file, not to what it may import. Bun resolves relative specifiers against a module's real path, so a plugin can split into a `lib/` folder and still be found. `recall/` and `token-refresh/` do exactly that.
+Each plugin is a self-contained package directory with its own `package.json`, entrypoint and dependencies. OpenCode installs individual directories from GitHub using npm's `::path:` selector. Imports stay within the package or use declared package dependencies.
 
 | Plugin | Description | Requires / config |
 |---|---|---|
@@ -41,7 +39,7 @@ Top-level-only applies to discovery of a server-only entry file, not to what it 
 
 ## TUI plugins
 
-These use the [`@opentui/solid`](https://github.com/sst/opencode) JSX runtime and claim slots in the TUI's layout. Each package has an `index.ts` server entrypoint beside `tui.tsx`. `link.sh` symlinks the package directory into `<config>/plugins/<name>`, allowing the server to advertise the TUI entrypoint to connected clients. No `cli.json` entry is needed.
+TUI packages export `./tui` alongside their server entrypoint. OpenCode advertises the installed package's TUI capability to connected terminal clients. These packages do not need duplicate entries in `cli.json`.
 
 | Plugin | Description | Requires |
 |---|---|---|
@@ -89,35 +87,26 @@ Seven plugins were dropped in the OpenCode 2 port on the belief that v2 grew a n
 
 ## Install
 
-Clone the repo somewhere persistent, then wire it into your OpenCode config.
+Install the selected plugin packages from GitHub:
+
+```bash
+opencode2 plugin add 'github:MaxAnderson95/my-opencode-setup#main::path:plugins/recall'
+opencode2 plugin add 'github:MaxAnderson95/my-opencode-setup#main::path:plugins/background-jobs'
+```
+
+For skills and the theme, clone the repo and run the idempotent `link.sh`:
 
 ```bash
 git clone https://github.com/MaxAnderson95/my-opencode-setup.git ~/my-opencode-setup
 cd ~/my-opencode-setup
-bun install            # resolves @opencode-ai/plugin, transformers.js, etc.
-./link.sh              # symlinks plugins and skills into ~/.config/opencode/
-```
-
-`link.sh` handles each kind automatically, and is idempotent:
-
-- **Server-only plugins** → symlinks the inner file, e.g. `plugins/recall/recall.ts` → `~/.config/opencode/plugins/recall.ts`.
-- **Plugins with a TUI entrypoint** → symlinks the package directory, e.g. `plugins/elapsed-timer` → `~/.config/opencode/plugins/elapsed-timer`. OpenCode loads `index.ts` on the server and its sibling `tui.tsx` in connected terminal clients.
-- **Skills** → symlinks the directory, e.g. `skills/opencode-db-querying` → `~/.config/opencode/skills/opencode-db-querying`.
-- **Upgrading** → removes links from the retired flat TUI layout before creating current links.
-
-Then set the theme in `cli.json` (see [`cli.example.json`](cli.example.json)) and symlink it:
-
-```bash
-ln -s "$PWD/themes/ayu-max-custom.json" ~/.config/opencode/themes/ayu-max-custom.json
+./link.sh
 ```
 
 ## How plugins load (for adapters)
 
-OpenCode 2 discovers **server plugins** from an explicit entry in `opencode.jsonc`'s `plugins[]`, top-level `{plugin,plugins}/*.{ts,js}` files, or immediate package directories containing `index.ts` or `index.js`. Configured local paths must name a directory, not an entrypoint file.
+Package resolution uses `./server`, then the root export or `main`, with conventional index entrypoints as fallback. TUI packages export `./tui`. Branch specifications are mutable but updates are explicit: edit locally, run checks, commit and push, then run `opencode2 plugin update` for the selected GitHub package and verify its installed revision and behavior. A local source edit alone is not a deployment.
 
-**TUI plugins** load from `tui.*` beside a package's `index.*`. A connected TUI receives this capability from the active server plugin list. CLI-only packages can instead be configured as directories in `cli.json`.
-
-Passing options to a plugin requires listing its directory explicitly in `opencode.jsonc` with the object form; the plugin reads them from `ctx.options`.
+Use npm through Vite+ for development dependency installation; Bun runs the test suites. npm supports the Git subdirectory dependency syntax used by Hark's presence dependency. Do not create local plugin symlinks or edit OpenCode's installed package cache.
 
 ## License
 

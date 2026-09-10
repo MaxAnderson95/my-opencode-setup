@@ -14,7 +14,7 @@
     "opencode": ">=2.0.0-0"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": "*",
+    "@opencode-ai/plugin": "0.0.0-next-17403",
     "@opentui/core": "*",
     "@opentui/solid": "*",
     "solid-js": "*"
