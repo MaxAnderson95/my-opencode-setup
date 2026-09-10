@@ -21,6 +21,26 @@ describe("backgroundShellID", () => {
       }),
     ).toBeUndefined()
   })
+
+  test("recognizes a foreground shell moved to the background", () => {
+    expect(
+      backgroundShellID({
+        status: "completed",
+        input: { command: "sleep 60" },
+        metadata: { status: "running", shellID: "sh_example" },
+      }),
+    ).toBe("sh_example")
+  })
+
+  test("ignores a shell that is still blocking in the foreground", () => {
+    expect(
+      backgroundShellID({
+        status: "running",
+        input: { command: "sleep 60" },
+        metadata: { status: "running", shellID: "sh_example" },
+      }),
+    ).toBeUndefined()
+  })
 })
 
 describe("backgroundSubagentSessionID", () => {
@@ -32,5 +52,25 @@ describe("backgroundSubagentSessionID", () => {
         metadata: { status: "running", sessionID: "ses_example" },
       }),
     ).toBe("ses_example")
+  })
+
+  test("recognizes a foreground subagent moved to the background", () => {
+    expect(
+      backgroundSubagentSessionID({
+        status: "completed",
+        input: { agent: "general", description: "Sleep" },
+        metadata: { status: "running", sessionID: "ses_example" },
+      }),
+    ).toBe("ses_example")
+  })
+
+  test("ignores a subagent that is still blocking in the foreground", () => {
+    expect(
+      backgroundSubagentSessionID({
+        status: "running",
+        input: { agent: "general", description: "Sleep" },
+        metadata: { status: "running", sessionID: "ses_example" },
+      }),
+    ).toBeUndefined()
   })
 })
