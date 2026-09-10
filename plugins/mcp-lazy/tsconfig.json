@@ -9,5 +9,5 @@
     "types": ["bun"],
     "skipLibCheck": true
   },
-  "include": ["mcp-lazy.ts", "lib/**/*.ts"]
+  "include": ["mcp-lazy*.ts", "lib/**/*.ts"]
 }

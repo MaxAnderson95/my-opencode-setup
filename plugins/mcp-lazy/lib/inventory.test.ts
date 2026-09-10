@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { isOAuth, isProtected, renderBlock, unknownMsg } from "./inventory"
-import type { McpServerConfig, McpServerRow } from "./server"
+import type { McpServerConfig, McpServerRow } from "./inventory"
 
 const cfg: Record<string, McpServerConfig> = {
   exa: { type: "remote" },
@@ -49,15 +49,15 @@ describe("renderBlock", () => {
       cfg,
     )
     expect(block).toContain("- exa (always-on)")
-    expect(block).toContain("- atlassian (enabled this session)")
+    expect(block).toContain("- atlassian (enabled in this location)")
     expect(block).toContain("- dash0")
-    expect(block).toContain("- playwright — currently unavailable")
-    expect(block).toContain('mcp_disable(["atlassian"])')
+    expect(block).toContain("- playwright: currently unavailable")
+    expect(block).toContain('mcp_disable({"servers":["atlassian"]})')
   })
 
   test("needs_auth renders the auth hint with the oauth tag", () => {
     const block = renderBlock([row("atlassian", { status: "needs_auth" })], cfg)
-    expect(block).toContain("- atlassian (OAuth) — needs auth (have the user run: opencode mcp auth atlassian)")
+    expect(block).toContain("- atlassian (OAuth): needs auth (open /mcps, select the server, and sign in)")
   })
 
   test("no cleanup nudge when nothing is session-enabled", () => {
