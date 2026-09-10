@@ -1,4 +1,6 @@
 import { Plugin } from "@opencode-ai/plugin"
+import { createHash } from "node:crypto"
+import { createDelivery } from "./delivery"
 
 const endpoint = process.env.HARK_WEBHOOK_URL
 const idleDelay = 1000
@@ -97,30 +99,21 @@ export default Plugin.define({
       }
     }
 
-    // Hark has no subtitle field, so the project rides along in the sender title.
-    const send = async (title: string, project: string, body: string) => {
-      if (!(await away())) return
-      await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          title: clamp(`${title} · ${project}`, maxTitle),
-          body: clamp(body, maxBody),
-        }),
-      }).catch(() => undefined)
-    }
+    const deliver = createDelivery(url, away)
+    const eventKey = (event: ServerEvent) => createHash("sha256").update(JSON.stringify(event)).digest("hex")
 
-    const notify = async (sessionID: string, title: string, message: (name: string) => string) => {
+    const notify = async (sessionID: string, key: string, title: string, message: (name: string) => string) => {
       const session = await info(sessionID)
       if (session.child) return
-      await send(title, session.project, message(label(session.title)))
+      await deliver(key, {
+        title: clamp(`${title} · ${session.project}`, maxTitle),
+        body: clamp(message(label(session.title)), maxBody),
+      })
     }
 
     // Debounced end-of-execution notification, cancelled if a new execution
     // starts within idleDelay so quick continue prompts do not flap.
-    const finish = (sessionID: string) => {
+    const finish = (sessionID: string, key: string) => {
       const pending = timers.get(sessionID)
       if (pending) clearTimeout(pending)
 
@@ -132,11 +125,10 @@ export default Plugin.define({
         errors.delete(sessionID)
         const snippet = lastAssistantText(sessionID)
         texts.delete(sessionID)
-        if (!wasLongEnough) return
         if (errMsg) {
-          void notify(sessionID, "Errored", (name) => `${name} failed: ${errMsg}`)
-        } else {
-          void notify(sessionID, "Finished", (name) => snippet ?? `${name} is done.`)
+          void notify(sessionID, key, "Errored", (name) => `${name} failed: ${errMsg}`)
+        } else if (wasLongEnough) {
+          void notify(sessionID, key, "Finished", (name) => snippet ?? `${name} is done.`)
         }
       }, idleDelay)
 
@@ -170,14 +162,13 @@ export default Plugin.define({
         }
         case "session.execution.failed": {
           const sid = event.data.sessionID
-          if (!busySince.has(sid)) return
           errors.set(sid, event.data.error.message || event.data.error.type)
-          finish(sid)
+          finish(sid, eventKey(event))
           return
         }
         case "session.execution.succeeded": {
           if (!busySince.has(event.data.sessionID)) return
-          finish(event.data.sessionID)
+          finish(event.data.sessionID, eventKey(event))
           return
         }
         case "session.execution.interrupted": {
@@ -187,7 +178,7 @@ export default Plugin.define({
           // needs to hear about: supersession continues under a fresh
           // execution, whose started event finds busySince still set.
           if (event.data.reason === "user") {
-            if (busySince.has(sid)) finish(sid)
+            if (busySince.has(sid)) finish(sid, eventKey(event))
             return
           }
           const timer = timers.get(sid)
@@ -198,13 +189,11 @@ export default Plugin.define({
           return
         }
         case "permission.asked": {
-          if (!longEnough(event.data.sessionID)) return
-          void notify(event.data.sessionID, "Needs permission", (name) => `Waiting for approval in ${name}.`)
+          void notify(event.data.sessionID, eventKey(event), "Needs permission", (name) => `Waiting for approval in ${name}.`)
           return
         }
         case "question.asked": {
-          if (!longEnough(event.data.sessionID)) return
-          void notify(event.data.sessionID, "Has a question", (name) => `Waiting for your answer in ${name}.`)
+          void notify(event.data.sessionID, eventKey(event), "Has a question", (name) => `Waiting for your answer in ${name}.`)
           return
         }
       }

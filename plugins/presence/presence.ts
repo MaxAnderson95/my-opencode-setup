@@ -44,14 +44,14 @@ const humanDuration = (seconds: number) => {
 const idleSeconds = async () => {
   // `-d 1` would prune the depth that carries HIDIdleTime, so the full tree is
   // required here.
-  const { stdout } = await run("ioreg", ["-c", "IOHIDSystem"], { timeout: 3000, maxBuffer: MAX_BUFFER })
+  const { stdout } = await run("/usr/sbin/ioreg", ["-c", "IOHIDSystem"], { timeout: 3000, maxBuffer: MAX_BUFFER })
   const match = stdout.match(/"HIDIdleTime"\s*=\s*(\d+)/)
   if (!match) throw new Error("HIDIdleTime missing from ioreg output")
   return Number(match[1]) / 1e9
 }
 
 const screenLock = async () => {
-  const { stdout } = await run("ioreg", ["-n", "Root", "-d1", "-a"], { timeout: 3000, maxBuffer: MAX_BUFFER })
+  const { stdout } = await run("/usr/sbin/ioreg", ["-n", "Root", "-d1", "-a"], { timeout: 3000, maxBuffer: MAX_BUFFER })
   const locked = /<key>CGSSessionScreenIsLocked<\/key>\s*<true\/>/.test(stdout)
   const since = stdout.match(/<key>CGSSessionScreenLockedTime<\/key>\s*<integer>(\d+)<\/integer>/)
   return { locked, lockedAt: locked && since ? Number(since[1]) : null }
