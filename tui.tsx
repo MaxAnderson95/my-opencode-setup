@@ -1,6 +1,6 @@
 /** @jsxImportSource @opentui/solid */
 import { Plugin } from "@opencode-ai/plugin/tui"
-import { For, Show, createMemo, createSignal, onMount } from "solid-js"
+import { For, Show, createMemo, createSignal } from "solid-js"
 
 export default Plugin.define({
   id: "active-provider-account",
@@ -18,12 +18,11 @@ export default Plugin.define({
     const stop = context.data.listen(({ details }) => {
       if (details.type === "integration.connection.updated") void sync()
     })
+    void sync()
 
     const release = context.ui.slot({
       prepend: "sidebar.content",
       render: () => {
-        onMount(() => void sync())
-
         const accounts = createMemo(() => {
           revision()
           return (context.data.location.integration.list(location) ?? []).flatMap((integration) => {
