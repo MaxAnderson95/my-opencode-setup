@@ -1,5 +1,5 @@
 /** @jsxImportSource @opentui/solid */
-import { Plugin } from "@opencode-ai/plugin/tui"
+import { Plugin } from "@opencode/plugin/tui"
 import { MouseButton, RGBA, TextAttributes } from "@opentui/core"
 import { readFile } from "node:fs/promises"
 import { watchFile, unwatchFile } from "node:fs"
@@ -18,13 +18,13 @@ export default Plugin.define({
     // documented local preference file; never change it or the server config.
     const configPath = join(process.env.OPENCODE_CONFIG_DIR ?? join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "opencode"), "cli.json")
     const refreshAnimations = () => readFile(configPath, "utf8").then(
-      (text) => {
+      (text: string) => {
         const errors: ParseError[] = []
         const config = parse(text, errors, { allowTrailingComma: true })
         const valid = config !== null && typeof config === "object" && !Array.isArray(config)
         setAnimations(errors.length === 0 && valid && (config.animations === undefined || config.animations === true))
       },
-      (error) => setAnimations(error.code === "ENOENT"),
+      (error: { code?: string }) => setAnimations(error.code === "ENOENT"),
     )
     void refreshAnimations()
     watchFile(configPath, { persistent: false, interval: 1000 }, refreshAnimations)
@@ -105,7 +105,7 @@ export default Plugin.define({
                 if (!sessionID) return
                 event.preventDefault()
                 event.stopPropagation()
-                void ctx.client.session.command({ sessionID, command: "ultra", text: "" }).catch(() => {
+                void ctx.client.session.command({ sessionID, name: "ultra", text: "" }).catch(() => {
                   ctx.ui.toast.show({ message: "Could not toggle Ultra", variant: "error" })
                 })
               }}
