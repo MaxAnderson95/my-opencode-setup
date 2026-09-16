@@ -1,4 +1,4 @@
-import { Plugin } from "@opencode-ai/plugin"
+import { Plugin } from "@opencode/plugin"
 
 // Stamps the resolved model slug and reasoning variant onto every user
 // message so the model always knows what it is:
