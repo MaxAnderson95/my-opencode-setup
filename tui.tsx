@@ -1,5 +1,5 @@
 /** @jsxImportSource @opentui/solid */
-import { Plugin } from "@opencode-ai/plugin/tui"
+import { Plugin } from "@opencode/plugin/tui"
 
 // Not "session.delete": that id already owns ctrl+d inside the session-list
 // dialog, and a named command with no explicit `bind` inherits whatever the
