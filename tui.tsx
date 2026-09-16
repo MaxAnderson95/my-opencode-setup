@@ -1,5 +1,5 @@
 /** @jsxImportSource @opentui/solid */
-import { Plugin } from "@opencode-ai/plugin/tui"
+import { Plugin } from "@opencode/plugin/tui"
 import { createMemo, createSignal, For, Match, Show, Switch, type Accessor } from "solid-js"
 import { readCallout, type CalloutState } from "./state"
 

@@ -1,4 +1,4 @@
-import { Plugin } from "@opencode-ai/plugin"
+import { Plugin } from "@opencode/plugin"
 import { writeCallout } from "./state"
 
 // The v2 tool draft types raw JSON Schema inputs as `unknown`, so the executor
