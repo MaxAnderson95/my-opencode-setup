@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test"
-import type { Plugin } from "@opencode-ai/plugin"
+import type { Plugin } from "@opencode/plugin"
 
 test("early attention and failures notify, while short success and children stay silent", async () => {
   const originalEndpoint = process.env.HARK_WEBHOOK_URL
@@ -20,8 +20,8 @@ test("early attention and failures notify, while short success and children stay
   const events = [
     { type: "permission.asked", data: { sessionID: "parent", requestID: "p1" } },
     { type: "permission.asked", data: { sessionID: "parent", requestID: "p1" } },
-    { type: "question.asked", data: { sessionID: "parent", requestID: "q1" } },
-    { type: "question.asked", data: { sessionID: "child", requestID: "q2" } },
+    { type: "form.created", data: { form: { id: "q1", sessionID: "parent" } } },
+    { type: "form.created", data: { form: { id: "q2", sessionID: "child" } } },
     { type: "session.execution.failed", data: { sessionID: "failed", error: { type: "test", message: "failure" } } },
     { type: "session.execution.started", data: { sessionID: "short" } },
     { type: "session.execution.succeeded", data: { sessionID: "short" } },

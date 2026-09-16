@@ -10,7 +10,7 @@ Subscribes to the v2 server event stream (`ctx.event.subscribe()`) and POSTs to 
 |---|---|
 | `session.execution.succeeded` (also a user-initiated `session.execution.interrupted`) | *"Finished"* — with a cleaned excerpt of the last assistant message, up to Hark's full 2,000-char body (or *"… is done."*). |
 | `permission.asked` | *"Needs permission"* |
-| `question.asked` | *"Has a question"* |
+| `form.created` | *"Has a question"* |
 | `session.execution.failed` | *"Errored"* — with the error message. |
 
 The finish excerpt is assembled from `session.text.ended` events (the v2 plugin context has no message-listing API). The project shown in the title is the last path segment of the **session's** directory, so notifications name the right project even when one server hosts several.
