@@ -1,5 +1,5 @@
 /** @jsxImportSource @opentui/solid */
-import { Plugin } from "@opencode-ai/plugin/tui"
+import { Plugin } from "@opencode/plugin/tui"
 import { For, Show, createMemo, createSignal } from "solid-js"
 
 export default Plugin.define({
@@ -16,7 +16,7 @@ export default Plugin.define({
     }
 
     const stop = context.data.listen(({ details }) => {
-      if (details.type === "integration.connection.updated") void sync()
+      if (details.type === "credential.updated" || details.type === "credential.switched") void sync()
     })
     void sync()
 
