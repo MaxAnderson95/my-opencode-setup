@@ -1,5 +1,5 @@
 /** @jsxImportSource @opentui/solid */
-import { Plugin } from "@opencode-ai/plugin/tui"
+import { Plugin } from "@opencode/plugin/tui"
 
 function Commands(props: { context: Plugin.Context }) {
   const context = props.context

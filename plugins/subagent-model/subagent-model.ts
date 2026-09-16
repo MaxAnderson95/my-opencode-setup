@@ -1,5 +1,5 @@
-import { Agent, Model, Plugin } from "@opencode-ai/plugin"
-import { Error as ToolError } from "@opencode-ai/plugin/promise/tool"
+import { Agent, Model, Plugin } from "@opencode/plugin"
+import { Error as ToolError } from "@opencode/plugin/promise/tool"
 
 import {
   advertiseModelParameter,
@@ -71,7 +71,7 @@ export default Plugin.define({
         return
       }
 
-      const selection = resolveModel(requestedModel, (await ctx.catalog.model.list()).data)
+      const selection = resolveModel(requestedModel, (await ctx.model.list()).data)
       if (!selection.ok) {
         event.input = { ...withoutModel, agent: INVALID_AGENT, [MODEL_ERROR]: selection.error }
         return

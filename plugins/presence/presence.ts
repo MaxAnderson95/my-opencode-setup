@@ -1,4 +1,4 @@
-import { Plugin } from "@opencode-ai/plugin"
+import { Plugin } from "@opencode/plugin"
 import { execFile } from "node:child_process"
 import { readFile, writeFile } from "node:fs/promises"
 import { homedir, tmpdir } from "node:os"

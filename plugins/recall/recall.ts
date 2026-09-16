@@ -18,7 +18,7 @@ import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
 import { Database } from "bun:sqlite"
-import { Agent, Plugin } from "@opencode-ai/plugin"
+import { Agent, Plugin } from "@opencode/plugin"
 
 import { loadConfig, modelTag, type SummaryModel } from "./lib/config.ts"
 import { createEmbedder } from "./lib/embedder.ts"
@@ -220,7 +220,7 @@ export default Plugin.define({
           : undefined)
       let models: { providerID: string; modelID: string; variants: { id: string }[] }[]
       try {
-        models = (await ctx.catalog.model.list()).data
+        models = (await ctx.model.list()).data
       } catch {
         return "Could not load the configured provider/model catalog."
       }

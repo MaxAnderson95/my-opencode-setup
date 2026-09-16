@@ -1,5 +1,5 @@
 import { writeSync } from "node:fs"
-import { Plugin } from "@opencode-ai/plugin/tui"
+import { Plugin } from "@opencode/plugin/tui"
 
 // OSC 9;4 progress bar escape sequences (ConEmu protocol, supported by
 // Ghostty 1.2.0+). Ghostty renders a blue indeterminate bar at the top of

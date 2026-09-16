@@ -10,15 +10,16 @@
     "./rpc": "./rpc.ts"
   },
   "files": ["index.ts", "tui.tsx", "rpc.ts"],
+  "engines": { "opencode": ">=2.0.4" },
   "scripts": {
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "0.0.0-dev-19114",
+    "@opencode/plugin": "2.0.4",
     "jsonc-parser": "3.3.1"
   },
   "devDependencies": {
-    "@opencode-ai/theme": "0.0.0-dev-19114",
+    "@opencode/theme": "2.0.4",
     "solid-js": "1.9.12",
     "typescript": "5.9.3"
   },

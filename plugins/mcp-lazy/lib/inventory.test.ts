@@ -56,7 +56,7 @@ describe("renderBlock", () => {
   })
 
   test("needs_auth renders the auth hint with the oauth tag", () => {
-    const block = renderBlock([row("atlassian", { status: "needs_auth" })], cfg)
+    const block = renderBlock([row("atlassian", { status: "needs_auth", error: "OAuth required" })], cfg)
     expect(block).toContain("- atlassian (OAuth): needs auth (open /mcps, select the server, and sign in)")
   })
 

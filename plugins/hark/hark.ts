@@ -1,4 +1,4 @@
-import { Plugin } from "@opencode-ai/plugin"
+import { Plugin } from "@opencode/plugin"
 import { createHash } from "node:crypto"
 import { createDelivery } from "./delivery"
 
@@ -192,8 +192,8 @@ export default Plugin.define({
           void notify(event.data.sessionID, eventKey(event), "Needs permission", (name) => `Waiting for approval in ${name}.`)
           return
         }
-        case "question.asked": {
-          void notify(event.data.sessionID, eventKey(event), "Has a question", (name) => `Waiting for your answer in ${name}.`)
+        case "form.created": {
+          void notify(event.data.form.sessionID, eventKey(event), "Has a question", (name) => `Waiting for your answer in ${name}.`)
           return
         }
       }

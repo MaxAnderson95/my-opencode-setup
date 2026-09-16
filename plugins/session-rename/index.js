@@ -22,7 +22,7 @@ export default {
           const title = input.title.trim()
           if (!title) throw new Error("A non-empty session title is required.")
           if (!tool.sessionID) throw new Error("A current session is required.")
-          await ctx.session.rename({ sessionID: tool.sessionID, title })
+          await ctx.session.update({ sessionID: tool.sessionID, title })
           return { content: JSON.stringify({ title }) }
         },
       })

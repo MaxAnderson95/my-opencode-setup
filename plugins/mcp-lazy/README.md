@@ -16,7 +16,7 @@ Registry observation uses OpenCode's normalized MCP namespace. It does not execu
 
 Set `disabled: true` in `mcp.servers` for servers that should start off and allow runtime toggling. Servers enabled by the configuration before this plugin's transform are always-on and cannot be disabled through `mcp_disable`. Configuration reloads recompute this protection. Runtime toggles last until the Location/plugin is unloaded.
 
-The plugin depends on `@opencode/plugin` version `0.0.0-beta-19296`, matching the targeted OpenCode build. Other plugins retain their own SDK dependencies.
+The plugin depends on `@opencode/plugin` version `2.0.4`, matching the targeted OpenCode build.
 
 ## Checks
 

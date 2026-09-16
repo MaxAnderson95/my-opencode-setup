@@ -1,4 +1,4 @@
-import { Plugin } from "@opencode-ai/plugin"
+import { Plugin } from "@opencode/plugin"
 
 // Gives the model a clock. Two surfaces:
 //
@@ -99,7 +99,7 @@ function envNumber(name: string, fallback: number): number {
 
 type TextPart = { type: "text"; text: string }
 
-// The context hook hands over @opencode-ai/ai Message class instances, but
+// The context hook hands over @opencode/ai Message class instances, but
 // that package is not resolvable from this plugin's node_modules. Rebuilding
 // through the instance's own constructor keeps the result a real Message
 // (schema fields are own enumerable properties, so the spread carries them

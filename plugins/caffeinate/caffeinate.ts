@@ -1,4 +1,4 @@
-import { Plugin } from "@opencode-ai/plugin"
+import { Plugin } from "@opencode/plugin"
 import type { Subprocess } from "bun"
 
 // One caffeinate process per session. When a session begins executing we

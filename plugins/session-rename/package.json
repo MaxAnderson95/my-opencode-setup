@@ -8,5 +8,11 @@
   },
   "files": [
     "index.js"
-  ]
+  ],
+  "engines": {
+    "opencode": ">=2.0.4"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": "2.0.4"
+  }
 }
