@@ -51,6 +51,7 @@ TUI packages export `./tui` alongside their server entrypoint. OpenCode advertis
 | `session-close/` | `/close` slash command (and `Session > Close session tab` in the palette) that closes the current tab without deleting its session, then opens a fresh session tab. | Session tabs enabled |
 | `session-delete/` | `/delete` slash command (and `Session > Delete session` in the palette) that deletes the session you're looking at, after a confirm that names it and counts its child sessions. | — |
 | `session-id-badge/` | Current session ID in the TUI sidebar. | — |
+| `session-resume/` | Extends `/resume` to accept a session ID while preserving the native session picker when no ID is supplied. | — |
 
 ## Skills
 
