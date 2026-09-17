@@ -6,6 +6,35 @@ import { ALLOW, RESUME, STOP, type GuardHost, type SavedGate } from "./guard.ts"
 
 export const STATE_DIR = join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "opencode")
 
+export interface ServerConnection {
+  url: string
+  password?: string
+}
+
+interface HostOptions {
+  directory?: string
+  server?: ServerConnection
+}
+
+export function serverConnectionFromProcess(
+  args = process.argv.slice(2),
+  password = process.env.OPENCODE_SERVER_PASSWORD,
+): ServerConnection | undefined {
+  const value = (name: string) => {
+    const option = `--${name}`
+    const index = args.findIndex((arg) => arg === option || arg.startsWith(`${option}=`))
+    if (index === -1) return undefined
+    return args[index] === option ? args[index + 1] : args[index]!.slice(option.length + 1)
+  }
+  const rawPort = value("port")
+  if (!rawPort || !/^\d+$/.test(rawPort)) return undefined
+  const port = Number(rawPort)
+  if (port < 1 || port > 65_535) return undefined
+  const hostname = value("hostname") ?? "127.0.0.1"
+  const host = hostname.includes(":") && !hostname.startsWith("[") ? `[${hostname}]` : hostname
+  return { url: `http://${host}:${port}`, ...(password ? { password } : {}) }
+}
+
 const formPath = (root: string, id: string) =>
   `/api/session/${encodeURIComponent(root)}/form/${encodeURIComponent(id)}`
 
@@ -18,26 +47,29 @@ export function createHost(
   session: GuardHost["session"],
   adapters: readonly Adapter[],
   log: (message: string) => void,
-  directory = STATE_DIR,
+  options: HostOptions = {},
 ): GuardHost {
+  const directory = options.directory ?? STATE_DIR
   const file = join(directory, "overage-guard.json")
 
   async function request(method: string, path: string, body?: unknown) {
-    const registration = JSON.parse(await readFile(join(directory, "service.json"), "utf8")) as {
-      pid: number
-      url: string
-      password?: string
+    let server = options.server
+    if (!server) {
+      const registration = JSON.parse(await readFile(join(directory, "service.json"), "utf8")) as ServerConnection & {
+        pid: number
+      }
+      // Forms are process-local. Never silently create a question on another server.
+      if (registration.pid !== process.pid) {
+        throw new Error("Overage guard requires this OpenCode process to own the managed service registration")
+      }
+      server = registration
     }
-    // Forms are process-local. Never silently create a question on another server.
-    if (registration.pid !== process.pid) {
-      throw new Error("Overage guard requires this OpenCode process to own the managed service registration")
-    }
-    const response = await fetch(new URL(path, registration.url), {
+    const response = await fetch(new URL(path, server.url), {
       method,
       headers: {
         "content-type": "application/json",
-        ...(registration.password
-          ? { authorization: `Basic ${Buffer.from(`opencode:${registration.password}`).toString("base64")}` }
+        ...(server.password
+          ? { authorization: `Basic ${Buffer.from(`opencode:${server.password}`).toString("base64")}` }
           : {}),
       },
       body: body === undefined ? undefined : JSON.stringify(body),

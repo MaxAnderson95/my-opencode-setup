@@ -6,7 +6,7 @@ import { join } from "node:path"
 import { afterEach, it } from "bun:test"
 import { adapters } from "./lib/adapters.ts"
 import { ALLOW, OverageGuard } from "./lib/guard.ts"
-import { createHost } from "./lib/host.ts"
+import { createHost, serverConnectionFromProcess } from "./lib/host.ts"
 
 const cleanups: (() => Promise<unknown>)[] = []
 afterEach(async () => {
@@ -54,7 +54,7 @@ it("uses authenticated native forms without a tool call and persists the gate", 
     join(directory, "service.json"),
     JSON.stringify({ pid: process.pid, url: `http://127.0.0.1:${address.port}`, password: "test-password" }),
   )
-  const host = createHost(async (id) => ({ id }), adapters, noLog, directory)
+  const host = createHost(async (id) => ({ id }), adapters, noLog, { directory })
   const guard = new OverageGuard(host)
   cleanups.push(() => guard.close())
   const codex = { provider: "openai", id: "account" }
@@ -99,7 +99,7 @@ it("admits requests through the local session API when another process owns the 
     },
     adapters,
     noLog,
-    directory,
+    { directory },
   )
   const guard = new OverageGuard(host)
   cleanups.push(() => guard.close())
@@ -116,7 +116,41 @@ it("fails closed on malformed persistent spending state", async () => {
     JSON.stringify({ version: 1, gates: [{ root: "root", account: "account", allowedUntil: "forever" }] }),
   )
   await assert.rejects(
-    createHost(async (id) => ({ id }), adapters, noLog, directory).load(),
+    createHost(async (id) => ({ id }), adapters, noLog, { directory }).load(),
     /Invalid overage guard state/,
+  )
+})
+
+it("derives the current foreground server connection from OpenCode's process arguments", () => {
+  assert.deepEqual(
+    serverConnectionFromProcess(["serve", "--hostname=127.0.0.1", "--port=54968"], "private-password"),
+    { url: "http://127.0.0.1:54968", password: "private-password" },
+  )
+  assert.equal(serverConnectionFromProcess(["serve", "--service"], "private-password"), undefined)
+})
+
+it("uses an explicit foreground server instead of another process's managed service registration", async () => {
+  const directory = await stateDir("overage-foreground-")
+  await writeFile(join(directory, "service.json"), JSON.stringify({ pid: process.pid + 1, url: "http://127.0.0.1:1" }))
+  let authorization: string | undefined
+  const server = createServer((request, response) => {
+    authorization = request.headers.authorization
+    response.setHeader("content-type", "application/json")
+    response.end(JSON.stringify({ data: {} }))
+  })
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())))
+  const address = server.address()
+  assert.ok(address && typeof address !== "string")
+  const host = createHost(async (id) => ({ id }), adapters, noLog, {
+    directory,
+    server: { url: `http://127.0.0.1:${address.port}`, password: "foreground-password" },
+  })
+
+  await host.form("root", "question", "anthropic")
+
+  assert.equal(
+    authorization,
+    `Basic ${Buffer.from("opencode:foreground-password").toString("base64")}`,
   )
 })

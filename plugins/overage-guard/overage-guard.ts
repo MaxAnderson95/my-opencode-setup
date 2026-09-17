@@ -13,7 +13,7 @@ import { setTimeout as delay } from "node:timers/promises"
 import { Plugin } from "@opencode/plugin"
 import { adapters } from "./lib/adapters.ts"
 import { OverageGuard, type Account, type Ticket } from "./lib/guard.ts"
-import { createHost } from "./lib/host.ts"
+import { createHost, serverConnectionFromProcess } from "./lib/host.ts"
 
 const LOG = join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local/share"), "opencode/overage-guard.log")
 
@@ -42,7 +42,11 @@ export default Plugin.define({
   id: "overage-guard",
   setup: async (ctx) => {
     const byProvider = new Map(adapters.map((adapter) => [adapter.providerID, adapter]))
-    const guard = new OverageGuard(createHost((sessionID) => ctx.session.get({ sessionID }), adapters, log))
+    const guard = new OverageGuard(
+      createHost((sessionID) => ctx.session.get({ sessionID }), adapters, log, {
+        server: serverConnectionFromProcess(),
+      }),
+    )
     // Other plugins may replace the Request object between the two hooks, so
     // tickets are matched to responses per session and provider, in request
     // order. A mismatch between concurrent requests of one session is harmless:
