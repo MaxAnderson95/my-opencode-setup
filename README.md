@@ -12,6 +12,8 @@ The parent session receives a native question form (visible in the TUI and in cl
 - **Allow extra usage / Allow credits** permits paid usage until the provider's reported reset time, or for five minutes when no future reset time is known. The allowance belongs to the credential that tripped the gate; switching to another credential on that provider discards it.
 - **Stop session and subagents** interrupts the parent and all descendants. Dismissing the form does the same. Continuing a stopped session later asks again if the gate is still closed.
 
+A closed gate is discarded once the provider-reported reset time passes. The next response can close it again if the provider still reports paid usage.
+
 One gate exists per family. Whichever provider first reports paid usage owns the question; if the family also uses another guarded provider, that provider's responses can take over the question after the current decision lapses, but the two are not tracked independently.
 
 ## Providers
@@ -37,7 +39,7 @@ The wait happens in `http.request`, after other plugins that run earlier have bu
 
 ## Server requirements
 
-Session-family lookups use the in-process plugin API and work on any server. Forms and interrupts go through the HTTP API of the managed OpenCode service, and the plugin checks that its own process owns the registration in `$XDG_STATE_HOME/opencode/service.json` (default `~/.local/state/opencode/service.json`). On a server that does not own it, requests proceed normally until paid usage is detected; then the family stays paused because the question cannot be shown there.
+Session-family lookups use the in-process plugin API and work on any server. Forms and interrupts use the current foreground server when OpenCode was launched with `--port`, including private servers hosted by T3. Managed service processes use their registration in `$XDG_STATE_HOME/opencode/service.json` (default `~/.local/state/opencode/service.json`) and reject a registration owned by another process.
 
 ## State and logs
 

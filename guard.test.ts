@@ -208,6 +208,32 @@ describe("session-family overage guard", () => {
     await f.guard.close()
   })
 
+  it("discards a persisted gate after its provider-reported reset without consulting its stale form", async () => {
+    const f = fixture([
+      { root: "root", provider: "anthropic", account: "account", form: "frm_old", reset: 999_999 },
+    ])
+    f.host.state = async () => {
+      throw new Error("stale form belongs to another process")
+    }
+
+    await f.guard.before("root", A)
+
+    assert.equal(f.created.length, 0)
+    assert.deepEqual(f.saved(), [])
+    await f.guard.close()
+  })
+
+  it("reopens a live blocked gate when its provider-reported reset passes", async () => {
+    const f = fixture()
+    await f.guard.observe(await f.guard.before("root", A), using)
+    f.advance(1_000_001)
+
+    await f.guard.before("child", A)
+
+    assert.deepEqual(f.saved(), [])
+    await f.guard.close()
+  })
+
   it("recovers an answer submitted while the plugin was unloaded", async () => {
     const f = fixture([{ root: "root", provider: "anthropic", account: "account", form: "frm_old" }])
     f.forms.set("frm_old", { status: "answered", answer: { decision: ALLOW } })

@@ -84,12 +84,19 @@ export class OverageGuard {
   private now: () => number
   private probeTimeout: number
 
+  private report(error: unknown) {
+    try {
+      this.host.error(error)
+    } catch {}
+  }
+
   constructor(host: GuardHost, now = Date.now, probeTimeout = 60_000) {
     this.host = host
     this.now = now
     this.probeTimeout = probeTimeout
-    this.ready = host.load().then((saved) => {
-      for (const item of saved) {
+    this.ready = host.load().then(async (saved) => {
+      const active = saved.filter((item) => item.reset === undefined || item.reset > this.now())
+      for (const item of active) {
         this.gates.set(item.root, {
           ...item,
           phase: item.allowedUntil && item.allowedUntil > this.now() ? "allowed" : "blocked",
@@ -97,8 +104,9 @@ export class OverageGuard {
           waiters: new Set(),
         })
       }
+      if (active.length !== saved.length) await host.save(active)
     })
-    void this.ready.catch((error) => this.host.error(error))
+    void this.ready.catch((error) => this.report(error))
   }
 
   private root(session: string): Promise<string> {
@@ -130,6 +138,19 @@ export class OverageGuard {
   private wake(gate: Gate) {
     for (const waiter of gate.waiters) waiter.wake()
     gate.waiters.clear()
+  }
+
+  private async expire(gate: Gate): Promise<boolean> {
+    if (gate.phase !== "blocked" || gate.reset === undefined || gate.reset > this.now()) return false
+    const form = gate.form
+    gate.phase = "open"
+    gate.epoch++
+    gate.reset = undefined
+    gate.form = undefined
+    await this.persist()
+    this.wake(gate)
+    if (form) void this.host.cancel(gate.root, form).catch((error) => this.report(error))
+    return true
   }
 
   private async question(gate: Gate): Promise<void> {
@@ -192,6 +213,7 @@ export class OverageGuard {
     }
     for (;;) {
       if (this.closed || signal?.aborted) throw new Error("Overage wait interrupted")
+      await this.expire(gate)
       if (gate.stopping) {
         await gate.stopping
         throw stopped(gate)
@@ -348,6 +370,7 @@ export class OverageGuard {
     if (this.closed) return
     if (event.type === "server.connected") {
       for (const gate of this.gates.values()) {
+        if (await this.expire(gate)) continue
         if (gate.phase === "blocked" && gate.form) await this.question(gate)
       }
       return
