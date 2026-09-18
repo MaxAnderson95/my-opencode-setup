@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "oc-plugin-subagent-interrupt",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "main": "./subagent-interrupt.ts",
+  "engines": { "opencode": ">=2.0.4" },
+  "peerDependencies": { "@opencode/plugin": "2.0.4" }
+}
