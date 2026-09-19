@@ -8,11 +8,16 @@
     "./server": "./index.ts",
     "./tui": "./tui.tsx"
   },
-  "engines": { "opencode": ">=2.0.4" },
+  "engines": {
+    "opencode": ">=2.0.4"
+  },
   "peerDependencies": {
     "@opencode/plugin": "2.0.4",
     "@opentui/core": "*",
     "@opentui/solid": "*",
     "solid-js": "*"
+  },
+  "dependencies": {
+    "@typesafe-ai/sdk": "0.6.0"
   }
 }
