@@ -1,5 +1,6 @@
 import { afterEach, expect, mock, test } from "bun:test"
 import type { MessageListInput, SessionMessageInfo } from "@opencode/client"
+import { APIConnectionError, AuthenticationError } from "@typesafe-ai/sdk"
 import { askJev } from "./jev"
 
 const originalFetch = globalThis.fetch
@@ -92,11 +93,11 @@ test("reports yes probability and uncertainty including exact ties", async () =>
 test("API errors, invalid primitives, and timeouts never become decisions", async () => {
   process.env.TYPESAFE_API_KEY = "test-key"
   globalThis.fetch = Object.assign(async () => new Response("", { status: 401 }), { preconnect: originalFetch.preconnect })
-  await expect(askJev(client(), "ses_test", "Done?")).rejects.toThrow("HTTP 401")
+  await expect(askJev(client(), "ses_test", "Done?")).rejects.toBeInstanceOf(AuthenticationError)
   globalThis.fetch = Object.assign(async () => Response.json({ answers: { answer: { type: "choice", noul: 0.99 } } }), { preconnect: originalFetch.preconnect })
   await expect(askJev(client(), "ses_test", "Done?")).rejects.toThrow("invalid Noul")
   globalThis.fetch = Object.assign(async () => { throw new DOMException("Timed out", "TimeoutError") }, { preconnect: originalFetch.preconnect })
-  await expect(askJev(client(), "ses_test", "Done?")).rejects.toThrow("Timed out")
+  await expect(askJev(client(), "ses_test", "Done?")).rejects.toBeInstanceOf(APIConnectionError)
 })
 
 test("empty questions do not read history or call TypeSafe", async () => {
