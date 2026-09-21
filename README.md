@@ -36,6 +36,7 @@ Each plugin is a self-contained package directory with its own `package.json`, e
 | `model-identity/` | Stamps each user message with the resolved model and reasoning effort (`<model-slug>` / `<model-effort>`), so the model knows what it is. | — |
 | `subagent-model/` | Adds an optional per-invocation `model` override to the native `subagent` tool while retaining native child sessions, jobs, and TUI rendering. | — |
 | [`token-refresh/`](plugins/token-refresh/README.md) | Keeps every stored OAuth credential fresh, including inactive accounts, by resolving each one through core on a jittered two-minute schedule. Core does the actual refresh and persistence. | Logs to `~/.local/share/opencode/token-refresh.log`. |
+| `todo/` | Restores the removed `todowrite` tool. Each call replaces the current session's task list. | State in `~/.local/share/opencode/todo/`. |
 
 ## TUI plugins
 
@@ -52,6 +53,7 @@ TUI packages export `./tui` alongside their server entrypoint. OpenCode advertis
 | `session-delete/` | `/delete` slash command (and `Session > Delete session` in the palette) that deletes the session you're looking at, after a confirm that names it and counts its child sessions. | — |
 | `session-id-badge/` | Current session ID in the TUI sidebar. | — |
 | `session-resume/` | Extends `/resume` to accept a session ID while preserving the native session picker when no ID is supplied. | — |
+| `todo/` | Shows the current session's todo list in the sidebar, in the old Todo section. | — |
 
 ## Skills
 
