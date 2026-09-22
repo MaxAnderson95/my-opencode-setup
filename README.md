@@ -49,6 +49,7 @@ TUI packages export `./tui` alongside their server entrypoint. OpenCode advertis
 | `callout/` | Renders the current session's pinned callout in the sidebar (the display half of the `callout` server plugin). | — |
 | `elapsed-timer/` | Live session duration in the prompt footer while a session is working. | — |
 | `ghostty-progress/` | Drives Ghostty's OSC 9;4 progress-bar indicator while sessions work. Lives in the TUI because OpenCode 2's server runs detached from any terminal. | **Ghostty 1.2.0+** |
+| [`question-minimize/`](plugins/question-minimize/README.md) | `alt+m` minimizes a pending question form to a one-line bar so you can read and scroll the transcript, then restores it. Hides the host's form node, since OpenCode has no slot for it. | — |
 | `session-close/` | `/close` slash command (and `Session > Close session tab` in the palette) that closes the current tab without deleting its session, then opens a fresh session tab. | Session tabs enabled |
 | `session-delete/` | `/delete` slash command (and `Session > Delete session` in the palette) that deletes the session you're looking at, after a confirm that names it and counts its child sessions. | — |
 | `session-id-badge/` | Current session ID in the TUI sidebar. | — |
