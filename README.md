@@ -18,7 +18,7 @@ The manager shows your favorites in saved order, followed by every other model g
 | --- | --- |
 | `up` / `down` | Move the highlight |
 | `shift+up` / `shift+down` | Move the highlighted favorite up or down |
-| `ctrl+f` | Add or remove the highlighted model as a favorite (new favorites go to the bottom) |
+| `ctrl+f` | Add or remove the highlighted model as a favorite. New favorites go to the bottom; removing one moves the highlight to the next favorite so you can remove several in a row |
 | `enter` | Return to the built-in model picker |
 | `esc` | Close |
 
