@@ -72,6 +72,14 @@ export function listRows(input: {
   })
 }
 
+/** Where the cursor goes when the favorite at `index` is removed: the favorite below it, else the one above. */
+export function neighborFavorite(rows: readonly Row[], index: number): Row | undefined {
+  const below = rows[index + 1]
+  if (below?.favorite) return below
+  const above = rows[index - 1]
+  if (above?.favorite) return above
+}
+
 function FavoritesDialog(props: { context: Plugin.Context; file: FavoriteFile }) {
   const context = props.context
   const location = context.location ?? context.data.location.default()
@@ -158,7 +166,7 @@ function FavoritesDialog(props: { context: Plugin.Context; file: FavoriteFile })
   function toggle() {
     const row = current()
     if (!row) return
-    setSelected(row.key)
+    setSelected(row.favorite ? neighborFavorite(rows(), index())?.key : row.key)
     persist((list) => toggleFavorite(list, row.model))
   }
 

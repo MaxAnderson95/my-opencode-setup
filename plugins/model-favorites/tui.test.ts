@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { listRows } from "./tui"
+import { listRows, neighborFavorite } from "./tui"
 
 const model = (
   providerID: string,
@@ -47,6 +47,22 @@ describe("listRows", () => {
       ["Anthropic", "anthropic/opus"],
       ["OpenAI", "openai/astra"],
     ])
+  })
+
+  test("moves the cursor to the favorite below a removed one, else the one above", () => {
+    const rows = listRows({
+      models,
+      providers,
+      favorites: [
+        { providerID: "xai", modelID: "grok" },
+        { providerID: "openai", modelID: "sol" },
+      ],
+      query: "",
+    })
+
+    expect(neighborFavorite(rows, 0)?.key).toBe("openai/sol")
+    expect(neighborFavorite(rows, 1)?.key).toBe("xai/grok")
+    expect(neighborFavorite(rows.slice(1), 0)).toBeUndefined()
   })
 
   test("filters by every search term across title, provider, and ID", () => {
