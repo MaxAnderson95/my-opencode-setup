@@ -1,6 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "name": "oc-plugin-todo",
+  "name": "oc-plugin-model-favorites",
   "version": "0.1.0",
   "type": "module",
   "private": true,

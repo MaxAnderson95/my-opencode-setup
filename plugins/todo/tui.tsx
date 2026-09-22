@@ -45,9 +45,9 @@ export default Plugin.define({
             <box>
               <box flexDirection="row" gap={1} onMouseDown={() => todos().length > 2 && setOpen((value) => !value)}>
                 <Show when={todos().length > 2}>
-                  <text fg={context.theme.text.default}>{open() ? "▼" : "▶"}</text>
+                  <text fg={context.theme.text.base}>{open() ? "▼" : "▶"}</text>
                 </Show>
-                <text fg={context.theme.text.default}>
+                <text fg={context.theme.text.base}>
                   <b>Todo</b>
                 </text>
               </box>
@@ -56,8 +56,8 @@ export default Plugin.define({
                   {(todo) => {
                     const color =
                       todo.status === "in_progress"
-                        ? context.theme.text.feedback.warning.default
-                        : context.theme.text.subdued
+                        ? context.theme.text.feedback.warning.base
+                        : context.theme.text.muted
                     return (
                       <text fg={color} wrapMode="word">
                         [{mark(todo.status)}] {todo.content}
