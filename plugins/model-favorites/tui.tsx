@@ -1,9 +1,8 @@
 /** @jsxImportSource @opentui/solid */
-import type { ModelInfo, ProviderInfo } from "@opencode/client"
+import type { LocationRef, ModelInfo, ProviderInfo } from "@opencode/client"
 import { Plugin } from "@opencode/plugin/tui"
 import { RGBA, TextAttributes } from "@opentui/core"
-import { useTerminalDimensions } from "@opentui/solid"
-import { batch, createMemo, createSignal, For, Show } from "solid-js"
+import { batch, createMemo, createSignal } from "solid-js"
 import {
   createFavoriteFile,
   modelKey,
@@ -76,9 +75,12 @@ export function listRows(input: {
 function FavoritesDialog(props: { context: Plugin.Context; file: FavoriteFile }) {
   const context = props.context
   const location = context.location ?? context.data.location.default()
-  const dimensions = useTerminalDimensions()
-  const theme = createMemo(() => context.theme.surface("dialog"))
+  const theme = context.theme.surface("dialog")
   const [favorites, setFavorites] = createSignal<ModelRef[]>([])
+  const [catalog, setCatalog] = createSignal<{ models: ModelInfo[]; providers: ProviderInfo[] }>({
+    models: [],
+    providers: [],
+  })
   const [query, setQuery] = createSignal("")
   const [selected, setSelected] = createSignal<string>()
 
@@ -89,18 +91,26 @@ function FavoritesDialog(props: { context: Plugin.Context; file: FavoriteFile })
       variant: "error",
     })
 
-  props.file.read().then(setFavorites, fail)
-  if (!context.data.location.model.list(location)) context.data.location.model.sync(location).catch(fail)
-  if (!context.data.location.provider.list(location)) context.data.location.provider.sync(location).catch(fail)
+  async function load<T>(collection: {
+    list(location?: LocationRef): T[] | undefined
+    sync(location?: LocationRef): Promise<void>
+  }) {
+    if (!collection.list(location)) await collection.sync(location)
+    return collection.list(location) ?? []
+  }
 
-  const rows = createMemo(() =>
-    listRows({
-      models: context.data.location.model.list(location) ?? [],
-      providers: context.data.location.provider.list(location) ?? [],
-      favorites: favorites(),
-      query: query(),
-    }),
+  // Copy host data into local signals once: an installed package can load its own solid-js,
+  // which does not track the host's reactive stores.
+  Promise.all([props.file.read(), load(context.data.location.model), load(context.data.location.provider)]).then(
+    ([saved, models, providers]) =>
+      batch(() => {
+        setFavorites(saved)
+        setCatalog({ models, providers })
+      }),
+    fail,
   )
+
+  const rows = createMemo(() => listRows({ ...catalog(), favorites: favorites(), query: query() }))
   const index = createMemo(() => Math.max(0, rows().findIndex((row) => row.key === selected())))
   const current = () => rows()[index()]
 
@@ -112,7 +122,7 @@ function FavoritesDialog(props: { context: Plugin.Context; file: FavoriteFile })
       return previous ? [{ type: "space" }, ...header] : header
     }),
   )
-  const height = createMemo(() => Math.max(5, Math.min(entries().length, Math.floor(dimensions().height / 2) - 6)))
+  const height = () => Math.max(5, Math.min(entries().length, Math.floor(context.renderer.height / 2) - 6))
   const offset = createMemo((previous: number) => {
     const list = entries()
     const target = list.findIndex((entry) => entry.type === "row" && entry.row.key === current()?.key)
@@ -123,7 +133,6 @@ function FavoritesDialog(props: { context: Plugin.Context; file: FavoriteFile })
     if (target >= start + height()) start = target - height() + 1
     return Math.max(0, start)
   }, 0)
-  const visible = createMemo(() => entries().slice(offset(), offset() + height()))
 
   function move(delta: number) {
     const list = rows()
@@ -165,12 +174,45 @@ function FavoritesDialog(props: { context: Plugin.Context; file: FavoriteFile })
     ],
   }))
 
-  const Hint = (hint: { title: string; keys: string }) => (
+  const renderEntry = (entry: Entry) => {
+    if (entry.type === "space") return <box height={1} />
+    if (entry.type === "header")
+      return (
+        <box paddingLeft={3}>
+          <text fg={theme.hue.accent[200]} attributes={TextAttributes.BOLD}>
+            {entry.label}
+          </text>
+        </box>
+      )
+    const active = entry.row.key === current()?.key
+    const color = active ? theme.text.action.primary.focused : theme.text.base
+    return (
+      <box paddingLeft={3} paddingRight={3} backgroundColor={active ? theme.background.action.primary.focused : transparent}>
+        <text fg={color} attributes={active ? TextAttributes.BOLD : undefined} wrapMode="none" overflow="hidden">
+          {entry.row.title}
+          <span style={{ fg: active ? color : theme.text.muted }}>{" " + entry.row.provider}</span>
+        </text>
+      </box>
+    )
+  }
+
+  // Installed packages live under node_modules, which OpenTUI's Solid compiler skips, so JSX
+  // expressions are evaluated once. Only function children re-render; keep all changing output there.
+  const list = () =>
+    rows().length > 0 ? (
+      entries().slice(offset(), offset() + height()).map(renderEntry)
+    ) : (
+      <box paddingLeft={3}>
+        <text fg={theme.text.muted}>No models found</text>
+      </box>
+    )
+
+  const hint = (title: string, keys: string) => (
     <text>
-      <span style={{ fg: theme().text.base }}>
-        <b>{hint.title}</b>{" "}
+      <span style={{ fg: theme.text.base }}>
+        <b>{title}</b>{" "}
       </span>
-      <span style={{ fg: theme().text.muted }}>{hint.keys}</span>
+      <span style={{ fg: theme.text.muted }}>{keys}</span>
     </text>
   )
 
@@ -178,20 +220,20 @@ function FavoritesDialog(props: { context: Plugin.Context; file: FavoriteFile })
     <box gap={1} paddingBottom={1}>
       <box paddingLeft={4} paddingRight={4}>
         <box flexDirection="row" justifyContent="space-between">
-          <text fg={theme().text.base} attributes={TextAttributes.BOLD}>
+          <text fg={theme.text.base} attributes={TextAttributes.BOLD}>
             Favorite models
           </text>
-          <text fg={theme().text.muted} onMouseUp={() => context.ui.dialog.clear()}>
+          <text fg={theme.text.muted} onMouseUp={() => context.ui.dialog.clear()}>
             esc
           </text>
         </box>
         <box paddingTop={1}>
           <input
             placeholder="Search"
-            placeholderColor={theme().text.muted}
-            focusedBackgroundColor={theme().background.formfield.focused}
-            focusedTextColor={theme().text.formfield.focused}
-            cursorColor={theme().text.formfield.focused}
+            placeholderColor={theme.text.muted}
+            focusedBackgroundColor={theme.background.formfield.focused}
+            focusedTextColor={theme.text.formfield.focused}
+            cursorColor={theme.text.formfield.focused}
             onInput={(value) =>
               batch(() => {
                 setQuery(value)
@@ -203,47 +245,12 @@ function FavoritesDialog(props: { context: Plugin.Context; file: FavoriteFile })
         </box>
       </box>
       <box paddingLeft={1} paddingRight={1}>
-        <Show
-          when={rows().length > 0}
-          fallback={
-            <box paddingLeft={3}>
-              <text fg={theme().text.muted}>No models found</text>
-            </box>
-          }
-        >
-          <For each={visible()}>
-            {(entry) => {
-              if (entry.type === "space") return <box height={1} />
-              if (entry.type === "header")
-                return (
-                  <box paddingLeft={3}>
-                    <text fg={theme().hue.accent[200]} attributes={TextAttributes.BOLD}>
-                      {entry.label}
-                    </text>
-                  </box>
-                )
-              const active = () => entry.row.key === current()?.key
-              const color = () => (active() ? theme().text.action.primary.focused : theme().text.base)
-              return (
-                <box
-                  paddingLeft={3}
-                  paddingRight={3}
-                  backgroundColor={active() ? theme().background.action.primary.focused : transparent}
-                >
-                  <text fg={color()} attributes={active() ? TextAttributes.BOLD : undefined} wrapMode="none" overflow="hidden">
-                    {entry.row.title}
-                    <span style={{ fg: active() ? color() : theme().text.muted }}>{" " + entry.row.provider}</span>
-                  </text>
-                </box>
-              )
-            }}
-          </For>
-        </Show>
+        {() => list()}
       </box>
       <box paddingLeft={4} paddingRight={2} flexDirection="row" gap={2}>
-        <Hint title="Favorite" keys="ctrl+f" />
-        <Hint title="Move" keys="shift+↑↓" />
-        <Hint title="Model picker" keys="enter" />
+        {hint("Favorite", "ctrl+f")}
+        {hint("Move", "shift+↑↓")}
+        {hint("Model picker", "enter")}
       </box>
     </box>
   )
