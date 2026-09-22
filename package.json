@@ -11,10 +11,10 @@
     "./tui": "./tui.tsx"
   },
   "engines": {
-    "opencode": ">=2.0.4"
+    "opencode": ">=2.0.14"
   },
   "peerDependencies": {
-    "@opencode/plugin": "2.0.4",
+    "@opencode/plugin": "2.0.14",
     "@opentui/core": "*",
     "@opentui/solid": "*",
     "solid-js": "*"
