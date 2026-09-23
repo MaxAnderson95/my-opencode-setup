@@ -4,7 +4,15 @@
   "version": "0.1.0",
   "type": "module",
   "private": true,
-  "main": "./message-timestamps.ts",
+  "exports": {
+    ".": "./message-timestamps.ts",
+    "./tui": "./tui.tsx"
+  },
   "engines": { "opencode": ">=2.0.4" },
-  "peerDependencies": { "@opencode/plugin": "2.0.4" }
+  "peerDependencies": {
+    "@opencode/plugin": "2.0.4",
+    "@opentui/core": "*",
+    "@opentui/solid": "*",
+    "solid-js": "*"
+  }
 }
