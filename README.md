@@ -27,6 +27,15 @@ ISO 8601 in local time with a real UTC offset, so the model can line the stamp u
 <time>2026-07-27T14:12:03-04:00 (Mon), took 42s</time>
 ```
 
+**3. The TUI sidebar** shows when the session's most recent reply finished, for you rather than the model:
+
+```
+Last reply
+Wed, Sep 23 at 9:46:12 AM
+```
+
+A reply is the assistant step that ended the turn, the same rule OpenCode uses to draw the `Build · model · 38.3s` footer under a message. Intermediate tool-call steps do not count, so while a turn runs the sidebar still shows the previous reply. OpenCode has no plugin slot in that per-message footer row, which is why this lives in the sidebar.
+
 ## Why it works this way
 
 - **The v2 `session.hook("context")` rewrites the outbound request on every dispatch; nothing is persisted and nothing appears in the transcript.** Prompt caching is exact-prefix matching, so the transform is strictly deterministic: every stamp is derived from each message's persisted, immutable id, never from `Date.now()` applied to old messages. A message's stamp depends only on itself and the messages before it, so appending new turns never rewrites the cached prefix.

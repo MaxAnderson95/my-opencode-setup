@@ -2,6 +2,7 @@
   "$schema": "https://json.schemastore.org/tsconfig",
   "compilerOptions": {
     "target": "esnext",
+    "lib": ["esnext"],
     "module": "preserve",
     "moduleResolution": "bundler",
     "types": ["bun"],
@@ -9,7 +10,9 @@
     "skipLibCheck": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
-    "verbatimModuleSyntax": true
+    "verbatimModuleSyntax": true,
+    "jsx": "preserve",
+    "jsxImportSource": "@opentui/solid"
   },
-  "include": ["**/*.ts"]
+  "include": ["**/*.ts", "**/*.tsx"]
 }
