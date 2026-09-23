@@ -29,7 +29,6 @@ Each plugin is a self-contained package directory with its own `package.json`, e
 |---|---|---|
 | `caffeinate/` | Keeps macOS awake while sessions are working (one `caffeinate -di` per session; sleeps once all are idle). | **macOS** |
 | [`hark/`](plugins/hark/README.md) | Push notifications to a [Hark](https://hark.ryan.ceo) webhook when a long-running session finishes, needs permission, asks a question, or errors — so you get pinged on your iPhone. | `HARK_WEBHOOK_URL` env (no-op without it); a Hark account. |
-| [`mcp-lazy/`](plugins/mcp-lazy/README.md) | Model-controlled MCP server enable/disable so only in-use servers cost tool-schema context. Adds `mcp_enable` / `mcp_disable`. | — |
 | [`message-timestamps/`](plugins/message-timestamps/README.md) | Gives the model a clock: stamps every user message with local time (plus idle gap and previous-turn duration when they matter) and selectively stamps slow tool results, without breaking prompt caching. Also shows when the last reply finished in the TUI sidebar. | Optional `OPENCODE_MESSAGE_TIMESTAMP*` env overrides. |
 | [`recall/`](plugins/recall/README.md) | Long-term conversational memory: hybrid lexical (FTS5/BM25) + semantic (local transformers.js embeddings) search over every past OpenCode conversation. An escalation ladder of tools: `recall_search` (find sessions) / `recall_inspect` (search within one, or outline it) / `recall_expand` (read transcript) / `recall_summarize` (delegate to a cheap worker model, cached permanently) / `recall_status`. Announces long background indexing via TUI toasts and stays silent for routine catch-up. Multi-file (`lib/` + `bun test`). | One-time ~33 MB model download; reads the OpenCode DB read-only. Optional `~/.config/opencode/recall.json`. |
 | [`overage-guard/`](plugins/overage-guard/README.md) | Pauses a session and its subagents when a subscription provider starts billing beyond the plan (Anthropic extra usage, OpenAI Codex credits) and asks, via a native question form, whether to wait for the reset, allow it until then, or stop. One adapter per provider. Multi-file (`lib/` + `bun test`). | Guards OAuth (subscription) connections only. State in `~/.local/state/opencode/overage-guard.json`; needs the managed OpenCode service to show the question. |
@@ -84,6 +83,7 @@ Seven plugins were dropped in the OpenCode 2 port on the belief that v2 grew a n
 | `tool-timing/` | Per-call durations recorded on the message and rendered in the timeline. |
 | `local-session-commands/` | Nothing, as it turned out. Its `/delete` half is back as `session-delete/`: v2 only deletes sessions from inside the session-list dialog (`ctrl+d` twice), with no slash or palette command. Its `/open` half (macOS `open` on a path) is still gone — v2's native `/open` is the project picker, not the same thing. |
 | `subagent-model/` | Resurrected below: per-invocation model selection was still missing from the native `subagent` tool. |
+| `mcp-lazy/` | Code Mode (the default for every MCP server) keeps tool schemas out of model context, so enabling servers on demand no longer saved anything. |
 
 ## Theme
 
