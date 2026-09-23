@@ -74,7 +74,7 @@ export default Plugin.define({
       append: "sidebar.content",
       render: (input) => {
         sessions.add(input.sessionID)
-        const warning = context.theme.text.feedback.warning.default
+        const warning = context.theme.text.feedback.warning.base
         const value = createMemo(() => values()[input.sessionID])
         const lines = createMemo(() =>
           (value()?.content ?? "")
@@ -93,7 +93,7 @@ export default Plugin.define({
                   <Show
                     when={line.target}
                     fallback={
-                      <text fg={context.theme.text.default}>
+                      <text fg={context.theme.text.base}>
                         <Show when={line.content} fallback=" ">
                           <For each={line.segments}>
                             {(segment) => (
@@ -115,7 +115,7 @@ export default Plugin.define({
                     }
                   >
                     {(target: Accessor<NonNullable<ReturnType<typeof link>>>) => (
-                      <text fg={context.theme.text.default}>
+                      <text fg={context.theme.text.base}>
                         <a href={target().href}>{target().label}</a>
                       </text>
                     )}

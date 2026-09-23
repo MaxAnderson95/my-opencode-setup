@@ -14,10 +14,10 @@ export default Plugin.define({
       prepend: "sidebar.content",
       render: (input) => (
         <box>
-          <text fg={context.theme.text.default}>
+          <text fg={context.theme.text.base}>
             <b>Session</b>
           </text>
-          <text fg={context.theme.text.subdued}>{input.sessionID}</text>
+          <text fg={context.theme.text.muted}>{input.sessionID}</text>
         </box>
       ),
     })

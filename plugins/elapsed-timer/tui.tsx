@@ -71,7 +71,7 @@ export default Plugin.define({
 
         return (
           <Show when={busyStart() !== undefined}>
-            <text fg={context.theme.text.subdued}>{formatDuration(elapsed())}</text>
+            <text fg={context.theme.text.muted}>{formatDuration(elapsed())}</text>
           </Show>
         )
       },

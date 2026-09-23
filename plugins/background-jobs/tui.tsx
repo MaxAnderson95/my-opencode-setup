@@ -98,7 +98,7 @@ export default Plugin.define({
         return (
           <Show when={jobs().length > 0}>
             <box flexDirection="column" gap={1}>
-              <text fg={context.theme.text.default}>
+              <text fg={context.theme.text.base}>
                 <b>Background ({jobs().length})</b>
               </text>
               <For each={jobs()}>
@@ -112,10 +112,10 @@ export default Plugin.define({
                         : undefined
                     }
                   >
-                    <text fg={context.theme.text.default} wrapMode="word">
-                      <span style={{ fg: context.theme.text.feedback.info.default }}>●</span> {job.title}
+                    <text fg={context.theme.text.base} wrapMode="word">
+                      <span style={{ fg: context.theme.text.feedback.info.base }}>●</span> {job.title}
                     </text>
-                    <text fg={context.theme.text.subdued}>
+                    <text fg={context.theme.text.muted}>
                       {job.tool} · {duration(now() - job.started)}
                     </text>
                   </box>

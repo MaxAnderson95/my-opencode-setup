@@ -36,11 +36,11 @@ export default Plugin.define({
         return (
           <Show when={accounts().length > 0}>
             <box flexDirection="column">
-              <text fg={context.theme.text.default}>
+              <text fg={context.theme.text.base}>
                 <b>Accounts</b>
               </text>
               <For each={accounts()}>
-                {(account) => <text fg={context.theme.text.subdued}>{account}</text>}
+                {(account) => <text fg={context.theme.text.muted}>{account}</text>}
               </For>
             </box>
           </Show>
