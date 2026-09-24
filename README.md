@@ -65,10 +65,10 @@ Instruction sets the agent loads on demand. `link.sh` symlinks each `skills/<nam
 | `macos-root/` | Run commands as root via `osascript` (because `sudo` can't prompt for a password inside OpenCode). | **macOS** |
 | `md2pdf/` | Format/style Markdown for the `md2pdf` CLI (Markdown → HTML → headless Chrome → PDF). | `md2pdf` CLI + Chrome |
 | `pdf-reports/` | Author PDF reports by writing Markdown and converting with `md2pdf`. | `md2pdf` CLI |
-| `openusage/` | Report AI-subscription usage/limits by reading the local OpenUsage menu-bar app's HTTP API. | **macOS** + the OpenUsage app |
 | `dark-mode/` | Build a dark/light/system theme system: CSS token structure, the pre-paint script that kills the flash, the three-state control, plus Astro and React wiring. | — |
+| `ultra-mode/` | `/ultra-mode` turns on proactive delegation for the rest of the session: split independent work across subagents, keep working while they run, verify their results. User-invoked only (`opencode/autoinvoke: false`). | — |
 
-> `md2pdf` and `openusage` target specific local tools (a personal `md2pdf` CLI and the OpenUsage menu-bar app); they're only useful if you run those tools.
+> `md2pdf` and `pdf-reports` target a specific local tool (a personal `md2pdf` CLI); they're only useful if you run it.
 
 ## Retired plugins
 
@@ -83,6 +83,7 @@ Seven plugins were dropped in the OpenCode 2 port on the belief that v2 grew a n
 | `tool-timing/` | Per-call durations recorded on the message and rendered in the timeline. |
 | `local-session-commands/` | Nothing, as it turned out. Its `/delete` half is back as `session-delete/`: v2 only deletes sessions from inside the session-list dialog (`ctrl+d` twice), with no slash or palette command. Its `/open` half (macOS `open` on a path) is still gone — v2's native `/open` is the project picker, not the same thing. |
 | `subagent-model/` | Resurrected below: per-invocation model selection was still missing from the native `subagent` tool. |
+| `ultra/` | The `ultra-mode` skill. The plugin's TUI footer slot re-rendered in a tight loop whenever a session was open, sending ~2,300 `rpc/ultra/status` calls and `/api/event` subscriptions per second and pinning the server at 100% CPU. |
 | `mcp-lazy/` | Code Mode (the default for every MCP server) keeps tool schemas out of model context, so enabling servers on demand no longer saved anything. |
 
 ## Theme
