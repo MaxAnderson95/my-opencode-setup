@@ -3,7 +3,8 @@ import { Plugin } from "@opencode/plugin"
 export const anythingElse = {
   header: "Anything else?",
   question: "Anything else? (Optional: general thoughts to consider along with the answers above)",
-  options: [],
+  // A preselected option lets Enter skip the question; the form's custom row still accepts a typed note.
+  options: [{ label: "Nothing else", description: "Continue with just the answers above" }],
 }
 
 type QuestionInput = { questions: readonly { question?: unknown }[] }
