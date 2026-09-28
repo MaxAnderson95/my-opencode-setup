@@ -9,5 +9,5 @@
     "types": ["bun"],
     "skipLibCheck": true
   },
-  "include": ["model-identity.ts"]
+  "include": ["mcp-lazy*.ts", "lib/**/*.ts"]
 }
