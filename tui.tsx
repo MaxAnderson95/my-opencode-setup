@@ -47,6 +47,7 @@ export default Plugin.define({
           setMinimized(undefined)
           current.node.off(RenderableEvents.DESTROYED, restore)
           if (!current.node.isDestroyed) current.node.visible = true
+          if (anchor && !anchor.isDestroyed) anchor.visible = false
           current.pop()
         }
 
@@ -55,6 +56,7 @@ export default Plugin.define({
           const node = formNode(anchor.parent.getChildren(), anchor)
           if (!node) return
           node.visible = false
+          anchor.visible = true
           // Answering elsewhere, cancelling, or a replacement form destroys the node.
           node.once(RenderableEvents.DESTROYED, restore)
           setMinimized({ node, pop: context.keymap.mode.push(MINIMIZED_MODE) })
@@ -94,10 +96,13 @@ export default Plugin.define({
           ],
         }))
 
+        // Installed packages live under node_modules, where OpenTUI skips the Solid
+        // JSX compiler, so props are read once inside this render. Reading
+        // minimized() here would re-run the render and undo every minimize.
         return (
           <box
             ref={(value: BoxRenderable) => (anchor = value)}
-            visible={minimized() !== undefined}
+            visible={false}
             flexDirection="row"
             justifyContent="space-between"
             border={["left"]}
