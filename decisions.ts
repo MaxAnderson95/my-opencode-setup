@@ -59,8 +59,8 @@ export function decisionClient(options: {
       signal: AbortSignal.timeout(options.timeoutMs),
     })
     if (!response.ok) {
-      const detail = (await response.text().catch(() => "")).slice(0, 300)
-      throw new DecisionError(`${options.provider} returned HTTP ${response.status}: ${detail}`)
+      const text = await response.text().catch(() => "")
+      throw new DecisionError(`${options.provider} returned HTTP ${response.status}: ${errorDetail(text)}`)
     }
     const body: unknown = await response.json()
     const raw = isRecord(body) && isRecord(body.answers) ? body.answers : undefined
@@ -87,6 +87,16 @@ function score(key: string, value: unknown, levels: number): ScoreAnswer {
   if (!ordered.every(isProbability) || typeof value.score !== "number" || !isProbability(value.confidence))
     throw new DecisionError(`Invalid score answer for ${key}`)
   return { type: "score", score: value.score, probabilities: ordered, confidence: value.confidence }
+}
+
+/** The provider's own error message when the body carries one (`detail.message` or `error.message`). */
+function errorDetail(text: string) {
+  try {
+    const body: unknown = JSON.parse(text)
+    const holder = isRecord(body) ? (isRecord(body.detail) ? body.detail : isRecord(body.error) ? body.error : body) : {}
+    if (typeof holder.message === "string") return holder.message.slice(0, 200)
+  } catch {}
+  return text.slice(0, 200)
 }
 
 const isProbability = (value: unknown): value is number =>

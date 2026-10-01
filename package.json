@@ -7,11 +7,23 @@
   "main": "./index.ts",
   "exports": {
     ".": "./index.ts",
-    "./server": "./index.ts"
+    "./server": "./index.ts",
+    "./tui": "./tui.tsx"
   },
-  "engines": { "opencode": ">=2.0.21" },
-  "peerDependencies": { "@opencode/plugin": "2.0.21" },
+  "engines": {
+    "opencode": ">=2.0.21"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": "2.0.21",
+    "@opentui/core": "*",
+    "@opentui/solid": "*",
+    "solid-js": "*"
+  },
   "devDependencies": {
-    "@types/bun": "^1.3.14"
+    "@types/bun": "^1.3.14",
+    "@opentui/core": "0.5.12",
+    "@opentui/solid": "0.5.12",
+    "solid-js": "1.9.15",
+    "@standard-schema/spec": "1.1.0"
   }
 }
