@@ -5,6 +5,8 @@ import { appendFile, mkdir } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import { type Decide, decisionClient, type Provider, providers, readApiKey } from "./decisions"
+import { type Health, Judge } from "./rpc"
+import { evaluate, hasFileRedirect, normalize, type Rule } from "./shell"
 import {
   collectEvidence,
   createBreaker,
@@ -87,20 +89,71 @@ export default Plugin.define({
       return typeof stored === "boolean" ? stored : config.defaultAuto
     }
 
+    let health: Health = { available: true }
+    let retryAt = 0
+    const status = await ctx.rpc.register(Judge, { health: async () => health })
+    const setHealth = (next: Health) => {
+      if (next.available === health.available) return
+      health = next
+      status.events.emit("health", next).catch(() => {})
+    }
+    const unavailable = (error: unknown) => {
+      retryAt = Date.now() + retryAfterMs
+      setHealth({ available: false, reason: String(error instanceof Error ? error.message : error), since: Date.now() })
+    }
+    // Surface a missing API key as soon as the plugin loads rather than at the first prompt.
+    decide().catch(unavailable)
+
+    // Tool call ID -> full shell command. Permission requests only carry per-command resources.
+    const commands = new BoundedMap<string, string>(200)
+    await ctx.tool.hook("execute.before", (event) => {
+      if (event.tool !== "shell" || !isRecord(event.input) || typeof event.input.command !== "string") return
+      commands.set(event.id, event.input.command)
+    })
+
+    /** The user's own rules applied to the shell forms OpenCode's wildcards cannot match safely. */
+    const ruleEffect = async (event: PermissionEvaluation, command: string) => {
+      const session = await ctx.session.get({ sessionID: event.sessionID })
+      const agentID = event.agent ?? session.agent
+      if (!agentID) return "ask"
+      const agent = await ctx.agent.get({ agentID })
+      const rules: Rule[] = [...agent.data.permissions, ...(session.permissions ?? [])]
+      const effects = normalize(event.resources, command).map((resource) => evaluate(rules, "shell", resource))
+      if (effects.includes("deny")) return "deny"
+      return effects.every((effect) => effect === "allow") ? "allow" : "ask"
+    }
+
     await ctx.permission.hook("evaluate", async (event) => {
-      if (event.effect !== "ask") return
+      if (event.effect === "deny") return
+      const command = event.action === "shell" && event.source ? commands.get(event.source.id) : undefined
+      const redirect = command !== undefined && hasFileRedirect(command)
+      if (event.effect === "allow" && !redirect) return
       const base = { sessionID: event.sessionID, action: event.action, resources: event.resources }
       try {
         const rootID = await rootOf(event.sessionID)
         if (await isAuto(rootID)) {
+          if (event.effect === "ask") await log({ ...base, rule: "auto", effect: "allow" })
           event.effect = "allow"
-          await log({ ...base, rule: "auto", effect: "allow" })
           return
         }
+        // An allow rule matched each command, but the full command redirects to or from a file.
+        if (event.effect === "allow") event.effect = "ask"
         if (config.skip.includes(event.action)) return
+        if (command !== undefined && !redirect) {
+          const effect = await ruleEffect(event, command)
+          if (effect !== "ask") {
+            apply(event, effect === "allow" ? { effect, rule: "allowed" } : { effect, rule: "forbidden", reason: "it matches one of the user's deny rules" })
+            await log({ ...base, rule: effect === "allow" ? "allowlist" : "deny-rule", effect })
+            return
+          }
+        }
         const key = JSON.stringify([event.sessionID, event.source?.id, event.action, event.resources])
         const cached = verdicts.get(key)
         if (cached) return apply(event, cached)
+        if (!health.available && Date.now() < retryAt) {
+          await log({ ...base, rule: "unavailable", effect: "ask", redirect })
+          return
+        }
 
         const started = performance.now()
         const [messages, rootMessages] = await Promise.all([
@@ -116,14 +169,25 @@ export default Plugin.define({
           directory: ctx.location.project.directory,
           home: homedir(),
         })
-        const { answers, verdict: judged } = await judge(evidence, await decide(), config.thresholds)
-        const verdict = breaker(rootID, latestUserMessageID(rootMessages ?? messages), judged)
+        let judged: Awaited<ReturnType<typeof judge>>
+        try {
+          judged = await judge(evidence, await decide(), config.thresholds)
+          retryAt = 0
+          setHealth({ available: true })
+        } catch (error) {
+          unavailable(error)
+          await log({ ...base, rule: "unavailable", effect: "ask", error: String(error) })
+          return
+        }
+        const { answers } = judged
+        const verdict = breaker(rootID, latestUserMessageID(rootMessages ?? messages), judged.verdict)
         if (verdict.effect === "ask") verdicts.set(key, verdict)
         apply(event, verdict)
         await log({
           ...base,
           rule: verdict.rule,
           effect: verdict.effect,
+          redirect,
           input: evidence.request.input,
           risk: answers.risk.probabilities,
           authorized: answers.authorized.noul,
@@ -132,7 +196,7 @@ export default Plugin.define({
           ms: Math.round(performance.now() - started),
         })
       } catch (error) {
-        await log({ ...base, rule: "error", effect: "ask", error: String(error) })
+        await log({ ...base, rule: "error", effect: event.effect, error: String(error) })
       }
     })
 
@@ -145,6 +209,7 @@ export default Plugin.define({
     }
 
     await ctx.tool.hook("execute.after", (event) => {
+      commands.delete(event.id)
       const message = denials.get(event.id)
       if (message === undefined) return
       denials.delete(event.id)
@@ -173,6 +238,11 @@ export default Plugin.define({
     )
   },
 })
+
+const retryAfterMs = 30_000
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
 
 class BoundedMap<K, V> extends Map<K, V> {
   constructor(private readonly limit: number) {

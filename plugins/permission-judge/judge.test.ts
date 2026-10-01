@@ -1,4 +1,5 @@
-import { afterEach, expect, test } from "bun:test"
+import { afterEach, expect, mock, spyOn, test } from "bun:test"
+import * as os from "node:os"
 import type { Plugin } from "@opencode/plugin"
 import { decisionClient, DecisionError } from "./decisions"
 import plugin, { parseOptions } from "./index"
@@ -147,25 +148,51 @@ test("options reject invalid values", () => {
 
 type Hook = (event: any) => Promise<void> | void
 
+const userRules = [
+  { action: "*", resource: "*", effect: "allow" },
+  { action: "shell", resource: "*", effect: "ask" },
+  { action: "shell", resource: "git status *", effect: "allow" },
+  { action: "shell", resource: "git log *", effect: "allow" },
+  { action: "shell", resource: "echo *", effect: "allow" },
+  { action: "shell", resource: "git push *", effect: "deny" },
+]
+
 async function harness(options: Record<string, unknown>, storage = new Map<string, unknown>()) {
   const hooks: Record<string, Hook> = {}
   const commands: any[] = []
   const synthetic: any[] = []
+  const health: unknown[] = []
+  let handlers: Record<string, () => Promise<unknown>> = {}
   const ctx = {
     options: { logFile: false, ...options },
     location: { directory: "/repo", project: { directory: "/repo" } },
     storage: { get: async (key: string) => storage.get(key), set: async (key: string, value: unknown) => void storage.set(key, value) },
     session: {
-      get: async ({ sessionID }: { sessionID: string }) => ({ id: sessionID }),
+      get: async ({ sessionID }: { sessionID: string }) => ({ id: sessionID, agent: "build" }),
       context: async () => [user("msg_1", "run the tests"), assistant("msg_2", [{ id: "call_1", name: "shell", input: { command: "rm -rf ~" } }])],
       synthetic: async (input: unknown) => void synthetic.push(input),
     },
+    agent: { get: async () => ({ data: { permissions: userRules } }) },
+    rpc: {
+      register: async (_: unknown, value: typeof handlers) => {
+        handlers = value
+        return { events: { emit: async (_name: string, data: unknown) => void health.push(data) } }
+      },
+    },
     permission: { hook: async (_: string, fn: Hook) => void (hooks.evaluate = fn) },
-    tool: { hook: async (_: string, fn: Hook) => void (hooks.after = fn) },
+    tool: { hook: async (name: string, fn: Hook) => void (hooks[name === "execute.before" ? "before" : "after"] = fn) },
     command: { transform: async (fn: (editor: { add: (c: unknown) => void }) => void) => fn({ add: (c) => commands.push(c) }) },
   } as unknown as Plugin.Context
   await plugin.setup(ctx)
-  return { hooks, commands, synthetic, storage }
+  return { hooks, commands, synthetic, storage, health, status: () => handlers.health!() }
+}
+
+/** Runs a shell call through execute.before, then its permission evaluation. */
+async function shell(h: Awaited<ReturnType<typeof harness>>, command: string, resources: string[], effect = "ask") {
+  await h.hooks.before!({ tool: "shell", id: "call_1", input: { command } })
+  const event: any = { ...askEvent(), resources, effect }
+  await h.hooks.evaluate!(event)
+  return event
 }
 
 const askEvent = () => ({
@@ -227,4 +254,75 @@ test("model failures and skipped actions leave the request for the human", async
   const allowed: any = { ...askEvent(), effect: "allow" }
   await hooks.evaluate!(allowed)
   expect(allowed.effect).toBe("allow")
+})
+
+test("user allow rules extend to git -C, GH_TOKEN-prefixed gh, and sed line ranges without calling Jev", async () => {
+  process.env.TYPESAFE_API_KEY = "test"
+  let calls = 0
+  globalThis.fetch = (async () => {
+    calls++
+    return Response.json(wire([0, 0, 0.5, 0.5], 0.5, 0.5))
+  }) as unknown as typeof fetch
+  const h = await harness({})
+  expect((await shell(h, "git -C /tmp/x status && git -C \"$R\" log -3", ["git -C /tmp/x status", 'git -C "$R" log -3'])).effect).toBe("allow")
+  expect((await shell(h, "git -C /tmp/x push origin main", ["git -C /tmp/x push origin main"])).effect).toBe("deny")
+  expect(calls).toBe(0)
+  expect((await shell(h, "git -C /tmp/x commit -m x", ["git -C /tmp/x commit -m x"])).effect).toBe("ask")
+  expect(calls).toBe(1)
+})
+
+test("an allowed command that redirects to a file goes to Jev", async () => {
+  process.env.TYPESAFE_API_KEY = "test"
+  let calls = 0
+  globalThis.fetch = (async () => {
+    calls++
+    return Response.json(wire([0, 0, 0.1, 0.9], 0.05, 0.05))
+  }) as unknown as typeof fetch
+  const h = await harness({})
+  expect((await shell(h, "echo hi 2>&1 >/dev/null", ["echo hi 2>&1 >/dev/null"], "allow")).effect).toBe("allow")
+  expect(calls).toBe(0)
+  expect((await shell(h, "{ echo x; } > ~/.zshrc", ["echo x"], "allow")).effect).toBe("deny")
+  expect(calls).toBe(1)
+})
+
+test("when Jev fails, prompts go to the human, health is reported, and calls pause until the retry window", async () => {
+  process.env.TYPESAFE_API_KEY = "test"
+  let calls = 0
+  let fail = true
+  globalThis.fetch = (async () => {
+    calls++
+    return fail ? new Response("down", { status: 503 }) : Response.json(wire([0.9, 0.1, 0, 0], 0.9, 0))
+  }) as unknown as typeof fetch
+  const h = await harness({})
+  expect(await h.status()).toEqual({ available: true })
+  expect((await shell(h, "bun test", ["bun test"])).effect).toBe("ask")
+  expect(h.health).toMatchObject([{ available: false }])
+  expect(await h.status()).toMatchObject({ available: false, reason: "typesafe returned HTTP 503: down" })
+  fail = false
+  expect((await shell(h, "bun test", ["bun test"])).effect).toBe("ask")
+  expect(calls).toBe(1)
+  const now = Date.now()
+  const clock = spyOn(Date, "now").mockReturnValue(now + 31_000)
+  try {
+    expect((await shell(h, "bun test", ["bun test"])).effect).toBe("allow")
+  } finally {
+    clock.mockRestore()
+  }
+  expect(calls).toBe(2)
+  expect(h.health).toMatchObject([{ available: false }, { available: true }])
+})
+
+test("a missing API key is reported at startup", async () => {
+  const saved = process.env.TYPESAFE_API_KEY
+  delete process.env.TYPESAFE_API_KEY
+  // Keep the fallback from finding a real ~/.env_private.
+  mock.module("node:os", () => ({ ...os, homedir: () => "/nonexistent" }))
+  try {
+    const h = await harness({})
+    await Bun.sleep(10)
+    expect(h.health).toMatchObject([{ available: false, reason: expect.stringContaining("TYPESAFE_API_KEY") }])
+  } finally {
+    process.env.TYPESAFE_API_KEY = saved
+    mock.module("node:os", () => os)
+  }
 })
