@@ -1,0 +1,2 @@
+os: [darwin]
+reason: Reads HID idle time and screen-lock state through macOS ioreg; registers nothing elsewhere.

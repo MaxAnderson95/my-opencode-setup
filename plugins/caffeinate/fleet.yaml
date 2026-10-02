@@ -1,0 +1,2 @@
+os: [darwin]
+reason: Runs the macOS caffeinate binary; registers nothing elsewhere.

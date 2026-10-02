@@ -2,7 +2,7 @@
 
 Personal [OpenCode](https://opencode.ai) plugins, skills, slash commands, and a theme — packaged so you can cherry-pick the pieces you want. Everything is self-contained: one folder per plugin/skill, each with its own metadata.
 
-> **Platform:** built and tested on **macOS**. A few plugins/skills are macOS-specific (flagged in the tables below); the rest are cross-platform.
+> **Platform:** built and tested on **macOS**. A few plugins/skills are macOS-specific (flagged in the tables below); the rest are cross-platform. A folder's optional `fleet.yaml` says where it belongs: `os` lists the operating systems it runs on (`darwin`, `linux`), and `attended: true` means it needs a person at the machine, such as desk hardware. My own config rendering reads it to leave those pieces off headless machines.
 
 ## Requirements
 

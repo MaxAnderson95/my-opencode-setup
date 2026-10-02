@@ -1,0 +1,2 @@
+os: [darwin]
+reason: Elevates through osascript, which exists only on macOS.
