@@ -67,6 +67,7 @@ Instruction sets the agent loads on demand. `link.sh` symlinks each `skills/<nam
 | `pdf-reports/` | Author PDF reports by writing Markdown and converting with `md2pdf`. | `md2pdf` CLI |
 | `dark-mode/` | Build a dark/light/system theme system: CSS token structure, the pre-paint script that kills the flash, the three-state control, plus Astro and React wiring. | — |
 | `btca-local/` | Read upstream source from local clones in `~/.btca/agent/sandbox`, pinned to the installed version or the remote default branch, without mutating the clone. Forked from [davis7dotsh/better-context](https://github.com/davis7dotsh/better-context). | `git` |
+| `writing-opencode-plugins/` | Build, extend, debug, and port OpenCode v2 plugins: server hooks and tools, TUI slots and commands, providers and OAuth, RPC, packaging, and v1 migration. Examples typecheck against `@opencode/plugin` 2.0.20. | — |
 | `ultra-mode/` | `/ultra-mode` turns on proactive delegation for the rest of the session: split independent work across subagents, keep working while they run, verify their results. User-invoked only (`opencode/autoinvoke: false`). | — |
 
 > `md2pdf` and `pdf-reports` target a specific local tool (a personal `md2pdf` CLI); they're only useful if you run it.
