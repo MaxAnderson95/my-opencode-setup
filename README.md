@@ -64,6 +64,7 @@ Instruction sets the agent loads on demand. `link.sh` symlinks each `skills/<nam
 | `macos-root/` | Run commands as root via `osascript` (because `sudo` can't prompt for a password inside OpenCode). | **macOS** |
 | `md2pdf/` | Format/style Markdown for the `md2pdf` CLI (Markdown → HTML → headless Chrome → PDF). | `md2pdf` CLI + Chrome |
 | `pdf-reports/` | Author PDF reports by writing Markdown and converting with `md2pdf`. | `md2pdf` CLI |
+| `html-reports/` | Author self-contained, phone-friendly HTML reports in AgentDrop's "Ink Ledger" design system, reviewed and published as AgentDrop Drafts. | AgentDrop account; Anthropic's [`frontend-design`](https://github.com/anthropics/skills/tree/main/skills/frontend-design) skill (recommended) |
 | `dark-mode/` | Build a dark/light/system theme system: CSS token structure, the pre-paint script that kills the flash, the three-state control, plus Astro and React wiring. | — |
 | `btca-local/` | Read upstream source from local clones in `~/.btca/agent/sandbox`, pinned to the installed version or the remote default branch, without mutating the clone. Forked from [davis7dotsh/better-context](https://github.com/davis7dotsh/better-context). | `git` |
 | `writing-opencode-plugins/` | Build, extend, debug, and port OpenCode v2 plugins: server hooks and tools, TUI slots and commands, providers and OAuth, RPC, packaging, and v1 migration. Examples typecheck against `@opencode/plugin` 2.0.20. | — |
