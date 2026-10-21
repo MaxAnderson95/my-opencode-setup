@@ -179,19 +179,37 @@ motion behind a `matchMedia('(prefers-reduced-motion: reduce)')` check.
 @keyframes rise-in { from { opacity: 0; transform: translateY(6px); } }
 ```
 
-- **Load, once:** the header drops in with `page-in` over 300ms `--ease-out`; sheets follow with
-  `rise-in` over 340ms, staggered 35ms apart after a 110ms lead (`animation-delay:
-  calc(110ms + var(--i) * 35ms)`).
+- **Header on load:** the header drops in with `page-in` over 300ms `--ease-out`.
+- **Sheets on scroll, once:** each top-level sheet rises in with `rise-in` over about 420ms
+  `--ease-out` when it first scrolls into view, and its charts and figures animate at that
+  moment. Each sheet animates once per page load: re-scrolling leaves it still.
 - **Figures** count up from zero over 800ms with a cubic ease-out (`1 - (1 - t) ** 3`) in a
-  `requestAnimationFrame` loop.
-- **Charts** draw their coral mark last: a pop over 460ms `--ease-pop`, or a line revealed with
-  a `clip-path: inset(0 100% 0 0)` to `inset(0)` animation over about 900ms.
+  `requestAnimationFrame` loop, started when their sheet reveals.
+- **Charts** draw their coral mark last: a pop over 460ms `--ease-pop`, a line revealed with
+  a `clip-path: inset(0 100% 0 0)` to `inset(0)` animation over about 900ms, or bars growing
+  with `scaleY(0)` to `none` from `transform-origin: bottom` over about 700ms.
 - **Responses to the reader:** exits and collapses fade over 110ms ease-in; panels slide over
   350ms `cubic-bezier(0.7, 0, 0.2, 1)`; icons nudge 1.5 to 2px on hover over 180ms; a trailing
   coral period may drop in from 9px above over 760ms after 280ms.
 
-That is the whole budget: one orchestrated load plus motion that answers the reader. No
-scroll-triggered fades per section and no looping animation.
+The whole budget is the header load, the once-per-sheet scroll reveal, and motion that answers
+the reader. Animation never loops.
+
+**Wire the scroll reveal this way** so content is never stuck hidden:
+
+1. A tiny script in `<head>` adds `reveal-on` to `<html>` only when
+   `matchMedia('(prefers-reduced-motion: no-preference)')` matches and `IntersectionObserver`
+   exists, so sheets are hidden before first paint and never flash.
+2. All hiding CSS is scoped under `.reveal-on` inside the `no-preference` media query: sheets
+   start at `opacity: 0`, chart lines at the hidden `clip-path`, bars at `scaleY(0)`. Adding
+   `.in` to a sheet sets the visible end state and runs its animations.
+3. One `IntersectionObserver` (`rootMargin: '0px 0px -10% 0px'`, `threshold: 0.08`) watches the
+   sheets. On the first callback where a sheet intersects, add `.in`, start its count-ups, and
+   `unobserve` it. A sheet whose `boundingClientRect.bottom <= 0` (already scrolled past, as
+   after a reload mid-page) gets `.in` plus `.seen`, where `.seen` sets `animation: none`, so
+   it appears without animating offscreen.
+4. With reduced motion or no `IntersectionObserver`, `reveal-on` is never set and everything
+   renders visible and still.
 
 ## Technical requirements
 
@@ -207,6 +225,17 @@ scroll-triggered fades per section and no looping animation.
   and `<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">`
   plus `<meta name="theme-color" content="#f7f6f2">`.
 - **Footer**: a mono footer with sources and a generated timestamp.
+- **Link every PR reference** to the PR on GitHub, wherever it appears: prose, tables, timeline,
+  follow-ups, footer.
+- **Link Dash0 evidence into Dash0**: every trace ID, span ID, and log record drawn from Dash0
+  links to the matching Dash0 view, built with the Dash0 MCP's `generateDash0Url` and bounded by
+  a time range. Leave metric charts unlinked: Dash0 query-builder links open from an AgentDrop
+  report in a sandboxed tab (no `allow-popups-to-escape-sandbox`), where Dash0 drops the query
+  and shows an empty builder, even though the same URL works when pasted into a browser.
+- **External links open a new tab**: give every `http(s)` link `target="_blank"
+  rel="noopener noreferrer"`. AgentDrop renders the report in a sandboxed iframe, so a plain link
+  navigates the frame itself, and sites such as GitHub refuse to load inside a frame. In-page
+  `#anchor` links stay as they are.
 
 ## Responsive — mandatory on every report
 
