@@ -11,5 +11,5 @@
     "types": ["bun"],
     "skipLibCheck": true
   },
-  "include": ["tui.tsx"]
+  "include": ["index.ts", "index.test.ts", "tui.tsx"]
 }

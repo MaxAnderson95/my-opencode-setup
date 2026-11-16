@@ -50,7 +50,7 @@ TUI packages export `./tui` alongside their server entrypoint. OpenCode advertis
 | [`question-minimize/`](plugins/question-minimize/README.md) | `alt+m` minimizes a pending question form to a one-line bar so you can read and scroll the transcript, then restores it. Hides the host's form node, since OpenCode has no slot for it. | — |
 | `session-close/` | `/close` slash command (and `Session > Close session tab` in the palette) that closes the current tab without deleting its session, then opens a fresh session tab. | Session tabs enabled |
 | `session-delete/` | `/delete` slash command (and `Session > Delete session` in the palette) that deletes the session you're looking at, after a confirm that names it and counts its child sessions. | — |
-| `session-id-badge/` | Current session ID in the TUI sidebar. | — |
+| `session-id-badge/` | Current session ID in the TUI sidebar and the model's system context. | — |
 | `session-resume/` | Extends `/resume` to accept a session ID while preserving the native session picker when no ID is supplied. | — |
 | `todo/` | Shows the current session's todo list in the sidebar, in the old Todo section. | — |
 
