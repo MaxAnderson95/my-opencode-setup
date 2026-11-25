@@ -39,7 +39,7 @@ The wait happens in `http.request`, after other plugins that run earlier have bu
 
 ## Server requirements
 
-Session-family lookups use the in-process plugin API and work on any server. Forms and interrupts use the current foreground server when OpenCode was launched with `--port`, including private servers hosted by T3. Managed service processes use their registration in `$XDG_STATE_HOME/opencode/service.json` (default `~/.local/state/opencode/service.json`) and reject a registration owned by another process.
+Session-family lookups use the in-process plugin API and work on any server. Forms and interrupts use the current foreground server when OpenCode was launched with `--port`, including private servers hosted by T3, authenticating with `OPENCODE_PASSWORD` (or the legacy `OPENCODE_SERVER_PASSWORD` when it is unset), the same precedence OpenCode uses. Managed service processes use their registration in `$XDG_STATE_HOME/opencode/service.json` (default `~/.local/state/opencode/service.json`) and reject a registration owned by another process.
 
 ## State and logs
 
