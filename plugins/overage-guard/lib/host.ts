@@ -18,8 +18,11 @@ interface HostOptions {
 
 export function serverConnectionFromProcess(
   args = process.argv.slice(2),
-  password = process.env.OPENCODE_SERVER_PASSWORD,
+  env: Record<string, string | undefined> = process.env,
 ): ServerConnection | undefined {
+  // OpenCode prefers OPENCODE_PASSWORD and honors the legacy name only when it is unset. Hosts such as
+  // T3 Code can set both to different values, so reading the legacy name alone authenticates wrongly.
+  const password = env.OPENCODE_PASSWORD || env.OPENCODE_SERVER_PASSWORD
   const value = (name: string) => {
     const option = `--${name}`
     const index = args.findIndex((arg) => arg === option || arg.startsWith(`${option}=`))

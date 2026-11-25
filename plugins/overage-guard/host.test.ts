@@ -123,10 +123,19 @@ it("fails closed on malformed persistent spending state", async () => {
 
 it("derives the current foreground server connection from OpenCode's process arguments", () => {
   assert.deepEqual(
-    serverConnectionFromProcess(["serve", "--hostname=127.0.0.1", "--port=54968"], "private-password"),
+    serverConnectionFromProcess(["serve", "--hostname=127.0.0.1", "--port=54968"], {
+      OPENCODE_SERVER_PASSWORD: "private-password",
+    }),
     { url: "http://127.0.0.1:54968", password: "private-password" },
   )
-  assert.equal(serverConnectionFromProcess(["serve", "--service"], "private-password"), undefined)
+  assert.deepEqual(
+    serverConnectionFromProcess(["serve", "--port=54968"], {
+      OPENCODE_PASSWORD: "current-password",
+      OPENCODE_SERVER_PASSWORD: "legacy-password",
+    }),
+    { url: "http://127.0.0.1:54968", password: "current-password" },
+  )
+  assert.equal(serverConnectionFromProcess(["serve", "--service"], { OPENCODE_PASSWORD: "private-password" }), undefined)
 })
 
 it("uses an explicit foreground server instead of another process's managed service registration", async () => {
