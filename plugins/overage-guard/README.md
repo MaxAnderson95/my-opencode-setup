@@ -8,11 +8,13 @@ Every model request passes through the guard. When a guarded provider's response
 
 The parent session receives a native question form (visible in the TUI and in clients that render forms, such as T3 Code). No model tool call is involved. Leaving it unanswered keeps the family paused.
 
-- **Resume after reset** releases one waiting request on the provider that tripped the gate. The rest stay paused until that response confirms subscription usage. Continued paid usage, a response with no usable signal, or no response within a minute asks again.
+- **Resume after reset** keeps the family paused without asking again until the provider-reported reset time, then reopens the gate. Chosen after that time (or when no reset time is known), it releases one waiting request on the provider that tripped the gate; the rest stay paused until that response confirms subscription usage. Continued paid usage, a response with no usable signal, or no response within a minute asks again.
 - **Allow extra usage / Allow credits** permits paid usage until the provider's reported reset time, or for five minutes when no future reset time is known. The allowance belongs to the credential that tripped the gate; switching to another credential on that provider discards it.
 - **Stop session and subagents** interrupts the parent and all descendants. Dismissing the form does the same. Continuing a stopped session later asks again if the gate is still closed.
 
-A closed gate is discarded once the provider-reported reset time passes. The next response can close it again if the provider still reports paid usage.
+A closed gate is discarded once the provider-reported reset time passes, whether or not a request is waiting. The next response can close it again if the provider still reports paid usage.
+
+Switching the provider's active credential (from any OpenCode client or Tally) releases a paused family. Waiting requests re-read the active credential every five seconds, because a switch made through another OpenCode process changes only the shared database.
 
 One gate exists per family. Whichever provider first reports paid usage owns the question; if the family also uses another guarded provider, that provider's responses can take over the question after the current decision lapses, but the two are not tracked independently.
 

@@ -58,9 +58,12 @@ export default Plugin.define({
     const registrations = [
       await ctx.session.hook("http.request", async (evt) => {
         const adapter = byProvider.get(evt.model.providerID)
-        const guarded = adapter ? await account(ctx, adapter.providerID) : undefined
-        const ticket = await guard.before(evt.sessionID, guarded, evt.request.signal)
-        if (!guarded) return
+        const ticket = await guard.before(
+          evt.sessionID,
+          adapter ? () => account(ctx, adapter.providerID) : undefined,
+          evt.request.signal,
+        )
+        if (!ticket.account) return
         const queue = inflight.get(key(evt)) ?? []
         queue.push(ticket)
         inflight.set(key(evt), queue)

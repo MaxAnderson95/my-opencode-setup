@@ -158,7 +158,9 @@ export function createHost(
               {
                 value: RESUME,
                 label: "Resume after reset",
-                description: `Try one waiting ${name} request; release the others only after subscription usage is confirmed.`,
+                description: reset && reset > Date.now()
+                  ? `Keep requests paused until ${name}'s reported reset time.`
+                  : `Try one waiting ${name} request; release the others only after subscription usage is confirmed.`,
               },
               {
                 value: ALLOW,
@@ -177,14 +179,14 @@ export function createHost(
       if (!response.ok) throw new Error("Overage question could not be created")
     },
     async state(root, id) {
-      const response = await request("GET", `${formPath(root, id)}/state`)
+      const response = await request("GET", formPath(root, id))
       if (response.status === 404) return undefined
-      const result = (await response.json()) as { data: Awaited<ReturnType<GuardHost["state"]>> }
-      return result.data
+      const result = (await response.json()) as { data: { state: Awaited<ReturnType<GuardHost["state"]>> } }
+      return result.data.state
     },
     async cancel(root, id) {
       const state = await this.state(root, id)
-      if (state?.status === "pending") await request("POST", `${formPath(root, id)}/cancel`)
+      if (state?.status === "pending") await request("DELETE", formPath(root, id))
     },
     error(error) {
       log(`guard error: ${error instanceof Error ? error.message : String(error)}`)
