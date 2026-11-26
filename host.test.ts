@@ -38,8 +38,9 @@ it("uses authenticated native forms without a tool call and persists the gate", 
     else if (path === "/api/session/root/form") {
       form = body
       response.end(JSON.stringify({ data: { ...body, sessionID: "root" } }))
-    } else if (path.endsWith("/state")) response.end(JSON.stringify({ data: state }))
-    else if (path.endsWith("/cancel")) {
+    } else if (form && path === `/api/session/root/form/${form.id}` && request.method === "GET")
+      response.end(JSON.stringify({ data: { ...form, sessionID: "root", state } }))
+    else if (form && path === `/api/session/root/form/${form.id}` && request.method === "DELETE") {
       state = { status: "cancelled" }
       response.writeHead(204).end()
     } else if (path.startsWith("/api/session?")) response.end(JSON.stringify({ data: [], cursor: {} }))
@@ -57,7 +58,7 @@ it("uses authenticated native forms without a tool call and persists the gate", 
   const host = createHost(async (id) => ({ id }), adapters, noLog, { directory })
   const guard = new OverageGuard(host)
   cleanups.push(() => guard.close())
-  const codex = { provider: "openai", id: "account" }
+  const codex = async () => ({ provider: "openai", id: "account" })
   const ticket = await guard.before("root", codex)
   await guard.observe(ticket, { using: true, reset: Date.now() + 1_000_000 })
   assert.deepEqual(form?.metadata, { kind: "question", source: "overage-guard", provider: "openai" })
@@ -74,8 +75,9 @@ it("uses authenticated native forms without a tool call and persists the gate", 
   })
   await new Promise<void>((resolve) => setImmediate(resolve))
   assert.equal(proceeded, false)
+  // A reply missed while disconnected is recovered by reading the form's state after reconnect.
   state = { status: "answered", answer: { decision: ALLOW } }
-  await guard.event({ type: "form.replied", data: { id: form?.id, sessionID: "root", answer: { decision: ALLOW } } })
+  await guard.event({ type: "server.connected", data: {} })
   await pending
   const disk = JSON.parse(await readFile(join(directory, "overage-guard.json"), "utf8"))
   assert.equal(disk.gates[0].provider, "openai")
@@ -104,7 +106,7 @@ it("admits requests through the local session API when another process owns the 
   const guard = new OverageGuard(host)
   cleanups.push(() => guard.close())
   assert.equal((await guard.before("child")).root, "root")
-  assert.equal((await guard.before("root", { provider: "anthropic", id: "account" })).root, "root")
+  assert.equal((await guard.before("root", async () => ({ provider: "anthropic", id: "account" }))).root, "root")
   assert.deepEqual(lookedUp, ["child", "root"])
   await assert.rejects(host.form("root", "question", "anthropic"), /own the managed service/)
 })

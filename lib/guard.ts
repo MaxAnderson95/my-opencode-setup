@@ -51,7 +51,8 @@ export interface GuardHost {
 }
 
 interface Gate extends SavedGate {
-  phase: "open" | "blocked" | "checking" | "allowed"
+  // "waiting" is a closed gate whose user chose to wait for the reset: it holds requests without a question.
+  phase: "open" | "blocked" | "waiting" | "checking" | "allowed"
   epoch: number
   waiters: Set<{ session: string; wake(): void; reject(error: Error): void }>
   creating?: Promise<void>
@@ -83,6 +84,7 @@ export class OverageGuard {
   private host: GuardHost
   private now: () => number
   private probeTimeout: number
+  private pollInterval: number
 
   private report(error: unknown) {
     try {
@@ -90,23 +92,43 @@ export class OverageGuard {
     } catch {}
   }
 
-  constructor(host: GuardHost, now = Date.now, probeTimeout = 60_000) {
+  constructor(host: GuardHost, now = Date.now, probeTimeout = 60_000, pollInterval = 5_000) {
     this.host = host
     this.now = now
     this.probeTimeout = probeTimeout
+    this.pollInterval = pollInterval
     this.ready = host.load().then(async (saved) => {
       const active = saved.filter((item) => item.reset === undefined || item.reset > this.now())
       for (const item of active) {
-        this.gates.set(item.root, {
+        const gate: Gate = {
           ...item,
           phase: item.allowedUntil && item.allowedUntil > this.now() ? "allowed" : "blocked",
           epoch: 0,
           waiters: new Set(),
-        })
+        }
+        this.gates.set(item.root, gate)
+        if (gate.phase === "blocked") this.atReset(gate)
       }
       if (active.length !== saved.length) await host.save(active)
     })
     void this.ready.catch((error) => this.report(error))
+  }
+
+  /** Reopens a closed gate when the provider-reported reset passes, even if no new request arrives. */
+  private atReset(gate: Gate) {
+    clearTimeout(gate.timer)
+    gate.timer = undefined
+    if (gate.reset === undefined || this.closed) return
+    // setTimeout fires immediately for delays beyond 2^31-1 ms, so long resets re-arm in steps.
+    const delay = Math.min(Math.max(gate.reset - this.now(), 0), 2 ** 31 - 1)
+    gate.timer = setTimeout(() => {
+      void this.expire(gate)
+        .then((expired) => {
+          if (!expired && (gate.phase === "blocked" || gate.phase === "waiting")) this.atReset(gate)
+        })
+        .catch((error) => this.report(error))
+    }, delay)
+    gate.timer.unref?.()
   }
 
   private root(session: string): Promise<string> {
@@ -141,8 +163,10 @@ export class OverageGuard {
   }
 
   private async expire(gate: Gate): Promise<boolean> {
-    if (gate.phase !== "blocked" || gate.reset === undefined || gate.reset > this.now()) return false
+    if (gate.phase !== "blocked" && gate.phase !== "waiting") return false
+    if (gate.reset === undefined || gate.reset > this.now()) return false
     const form = gate.form
+    clearTimeout(gate.timer)
     gate.phase = "open"
     gate.epoch++
     gate.reset = undefined
@@ -179,12 +203,19 @@ export class OverageGuard {
   }
 
   /**
-   * Waits until the session's family may send a request. Pass the account only
-   * for requests whose response will be handed back through `observe`.
+   * Waits until the session's family may send a request. Pass `resolve` only
+   * for requests whose response will be handed back through `observe`; it
+   * returns the active guarded account and is re-read while the request waits,
+   * so switching accounts releases a paused family.
    */
-  async before(session: string, account?: Account, signal?: AbortSignal): Promise<Ticket> {
+  async before(
+    session: string,
+    resolve?: () => Promise<Account | undefined>,
+    signal?: AbortSignal,
+  ): Promise<Ticket> {
     await this.ready
     const root = await this.root(session)
+    let account = await resolve?.()
     let gate = this.gates.get(root)
     if (!gate) {
       gate = {
@@ -197,22 +228,23 @@ export class OverageGuard {
       }
       this.gates.set(root, gate)
     }
-    // Switching credentials on the provider that owns the gate discards its
-    // state: a decision about one account never carries to another.
-    if (account && gate.account && account.provider === gate.provider && account.id !== gate.account) {
-      gate.account = account.id
-      gate.epoch++
-      gate.phase = "open"
-      gate.allowedUntil = undefined
-      clearTimeout(gate.timer)
-      const form = gate.form
-      gate.form = undefined
-      await this.persist()
-      if (form) await this.host.cancel(root, form)
-      this.wake(gate)
-    }
     for (;;) {
       if (this.closed || signal?.aborted) throw new Error("Overage wait interrupted")
+      // Switching credentials on the provider that owns the gate discards its
+      // state: a decision about one account never carries to another.
+      if (account && gate.account && account.provider === gate.provider && account.id !== gate.account) {
+        gate.account = account.id
+        gate.epoch++
+        gate.phase = "open"
+        gate.reset = undefined
+        gate.allowedUntil = undefined
+        clearTimeout(gate.timer)
+        const form = gate.form
+        gate.form = undefined
+        await this.persist()
+        if (form) await this.host.cancel(root, form)
+        this.wake(gate)
+      }
       await this.expire(gate)
       if (gate.stopping) {
         await gate.stopping
@@ -222,6 +254,7 @@ export class OverageGuard {
         gate.phase = "blocked"
         gate.allowedUntil = undefined
         gate.epoch++
+        this.atReset(gate)
         await this.persist()
       }
       const ticket: Ticket = { root, epoch: gate.epoch, session, account }
@@ -235,27 +268,32 @@ export class OverageGuard {
         if (gate.phase !== "blocked") continue
         if (!gate.form) throw stopped(gate)
       }
-      await new Promise<void>((resolve, reject) => {
+      await new Promise<void>((done, fail) => {
         const finish = () => {
           gate.waiters.delete(waiter)
           signal?.removeEventListener("abort", abort)
+          clearTimeout(poll)
         }
         const waiter = {
           session,
           wake: () => {
             finish()
-            resolve()
+            done()
           },
           reject: (error: Error) => {
             finish()
-            reject(error)
+            fail(error)
           },
         }
         const abort = () => waiter.reject(new Error("Overage wait interrupted"))
+        // Account switches happen in the database without an event this process sees, so re-read periodically.
+        const poll = resolve ? setTimeout(waiter.wake, this.pollInterval) : undefined
+        poll?.unref?.()
         gate.waiters.add(waiter)
         signal?.addEventListener("abort", abort, { once: true })
         if (signal?.aborted) abort()
       })
+      account = await resolve?.()
     }
   }
 
@@ -290,6 +328,7 @@ export class OverageGuard {
     gate.epoch++
     gate.probe = undefined
     gate.allowedUntil = undefined
+    this.atReset(gate)
     await this.persist()
     try {
       await this.question(gate)
@@ -308,10 +347,17 @@ export class OverageGuard {
     if (!gate) return
     gate.form = undefined
     const choice = state.status === "answered" ? state.answer.decision : STOP
-    if (choice === RESUME) {
+    if (choice === RESUME && gate.reset !== undefined && gate.reset > this.now()) {
+      // Hold every request without asking again; the reset timer reopens the gate.
+      gate.phase = "waiting"
+      gate.epoch++
+      this.atReset(gate)
+      await this.persist()
+    } else if (choice === RESUME) {
       gate.phase = "checking"
       gate.epoch++
       gate.probe = undefined
+      clearTimeout(gate.timer)
       gate.timer = setTimeout(() => {
         void this.block(gate).catch((error) => this.host.error(error))
       }, this.probeTimeout)
